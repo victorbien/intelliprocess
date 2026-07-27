@@ -1,0 +1,11 @@
+# AWS SAM deployment configuration
+# Copy to samconfig.toml and update values after initial deploy
+
+[default.deploy.parameters]
+stack_name = "intelliprocess-dev"
+resolve_s3 = true
+s3_prefix = "intelliprocess-dev"
+region = "us-east-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
+parameter_overrides = "Stage=dev KnowledgeBaseId=PLACEHOLDER BDAProjectArn=PLACEHOLDER GuardrailId=PLACEHOLDER"

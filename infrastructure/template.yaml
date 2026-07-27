@@ -1,0 +1,335 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  IntelliProcess AI Platform
+  Integrated AP Invoice Agent & Records Search Assistant
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+
+  KnowledgeBaseId:
+    Type: String
+    Description: Bedrock Knowledge Base ID (created manually)
+    Default: "PLACEHOLDER"
+
+  BDAProjectArn:
+    Type: String
+    Description: Bedrock Data Automation project ARN
+    Default: "PLACEHOLDER"
+
+  GuardrailId:
+    Type: String
+    Description: Bedrock Guardrails ID
+    Default: "PLACEHOLDER"
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [x86_64]
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+        DOCUMENT_BUCKET: !Ref DocumentsBucket
+        INVOICE_TABLE: !Ref InvoicesTable
+        PO_TABLE: !Ref PurchaseOrdersTable
+        GR_TABLE: !Ref GoodsReceiptsTable
+        CONVERSATION_TABLE: !Ref ConversationsTable
+        DOCUMENT_TABLE: !Ref DocumentsTable
+        KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+        BDA_PROJECT_ARN: !Ref BDAProjectArn
+        GUARDRAIL_ID: !Ref GuardrailId
+        BEDROCK_MODEL_ID: "anthropic.claude-3-sonnet-20240229-v1:0"
+        LOG_LEVEL: "INFO"
+
+Resources:
+  # ======================== S3 ========================
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "intelliprocess-docs-${Stage}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [PUT, POST, GET]
+            AllowedOrigins:
+              - "http://localhost:5173"
+              - "http://localhost:3000"
+            MaxAge: 3600
+
+  # ======================== DynamoDB ========================
+  InvoicesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "IntelliProcess-Invoices-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: documentId, AttributeType: S }
+        - { AttributeName: status, AttributeType: S }
+        - { AttributeName: uploadedBy, AttributeType: S }
+        - { AttributeName: uploadedAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: documentId, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-StatusDate
+          KeySchema:
+            - { AttributeName: status, KeyType: HASH }
+            - { AttributeName: uploadedAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: GSI-UserDate
+          KeySchema:
+            - { AttributeName: uploadedBy, KeyType: HASH }
+            - { AttributeName: uploadedAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  PurchaseOrdersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "IntelliProcess-PurchaseOrders-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: poNumber, AttributeType: S }
+        - { AttributeName: vendorName, AttributeType: S }
+        - { AttributeName: createdDate, AttributeType: S }
+      KeySchema:
+        - { AttributeName: poNumber, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-VendorDate
+          KeySchema:
+            - { AttributeName: vendorName, KeyType: HASH }
+            - { AttributeName: createdDate, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  GoodsReceiptsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "IntelliProcess-GoodsReceipts-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: grId, AttributeType: S }
+        - { AttributeName: poNumber, AttributeType: S }
+        - { AttributeName: receivedDate, AttributeType: S }
+      KeySchema:
+        - { AttributeName: grId, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-PONumber
+          KeySchema:
+            - { AttributeName: poNumber, KeyType: HASH }
+            - { AttributeName: receivedDate, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  ConversationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "IntelliProcess-Conversations-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: sessionId, AttributeType: S }
+        - { AttributeName: timestamp, AttributeType: S }
+        - { AttributeName: userId, AttributeType: S }
+      KeySchema:
+        - { AttributeName: sessionId, KeyType: HASH }
+        - { AttributeName: timestamp, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-UserSessions
+          KeySchema:
+            - { AttributeName: userId, KeyType: HASH }
+            - { AttributeName: timestamp, KeyType: RANGE }
+          Projection: { ProjectionType: KEYS_ONLY }
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "IntelliProcess-Documents-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: documentId, AttributeType: S }
+        - { AttributeName: category, AttributeType: S }
+        - { AttributeName: uploadedAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: documentId, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-CategoryDate
+          KeySchema:
+            - { AttributeName: category, KeyType: HASH }
+            - { AttributeName: uploadedAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  # ======================== Cognito ========================
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "IntelliProcess-Users-${Stage}"
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: intelliprocess-web
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      SupportedIdentityProviders: [COGNITO]
+
+  CognitoAPClerkGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: AP_CLERK
+      UserPoolId: !Ref CognitoUserPool
+
+  CognitoFinanceGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: FINANCE_MANAGER
+      UserPoolId: !Ref CognitoUserPool
+
+  CognitoStaffGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: STAFF
+      UserPoolId: !Ref CognitoUserPool
+
+  CognitoAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: ADMIN
+      UserPoolId: !Ref CognitoUserPool
+
+  # ======================== Lambda ========================
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "intelliprocess-api-${Stage}"
+      Handler: app.main.handler
+      CodeUri: ../backend/
+      Timeout: 60
+      MemorySize: 512
+      Policies:
+        - S3CrudPolicy: { BucketName: !Ref DocumentsBucket }
+        - DynamoDBCrudPolicy: { TableName: !Ref InvoicesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref PurchaseOrdersTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GoodsReceiptsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref ConversationsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref DocumentsTable }
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:Retrieve
+                - bedrock:RetrieveAndGenerate
+                - bedrock:ApplyGuardrail
+                - bedrock:InvokeDataAutomationAsync
+                - bedrock:GetDataAutomationStatus
+                - bedrock:StartIngestionJob
+                - bedrock:GetIngestionJob
+              Resource: "*"
+      Events:
+        ApiCatchAll:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /{proxy+}
+            Method: ANY
+
+  InvoiceProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "intelliprocess-processor-${Stage}"
+      Handler: app.main.handler
+      CodeUri: ../backend/
+      Timeout: 300
+      MemorySize: 512
+      Policies:
+        - S3ReadPolicy: { BucketName: !Ref DocumentsBucket }
+        - DynamoDBCrudPolicy: { TableName: !Ref InvoicesTable }
+        - DynamoDBReadPolicy: { TableName: !Ref PurchaseOrdersTable }
+        - DynamoDBReadPolicy: { TableName: !Ref GoodsReceiptsTable }
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeDataAutomationAsync
+                - bedrock:GetDataAutomationStatus
+              Resource: "*"
+      Events:
+        S3InvoiceUpload:
+          Type: S3
+          Properties:
+            Bucket: !Ref DocumentsBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - { Name: prefix, Value: "invoices/" }
+
+  # ======================== API Gateway ========================
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "IntelliProcess-API-${Stage}"
+      StageName: !Ref Stage
+      Auth:
+        DefaultAuthorizer: CognitoAuth
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Correlation-Id'"
+        AllowOrigin: "'*'"
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+
+  BucketName:
+    Description: S3 document bucket name
+    Value: !Ref DocumentsBucket
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+
+  UserPoolClientId:
+    Description: Cognito App Client ID
+    Value: !Ref CognitoUserPoolClient
+
+  ApiFunctionArn:
+    Description: API Lambda function ARN
+    Value: !GetAtt ApiFunction.Arn
+
+  ProcessorFunctionArn:
+    Description: Invoice Processor Lambda function ARN
+    Value: !GetAtt InvoiceProcessorFunction.Arn

@@ -1,0 +1,81 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-backend:
+    name: Deploy Backend (SAM)
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: aws-actions/setup-sam@v2
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: SAM Build
+        working-directory: infrastructure
+        run: sam build
+
+      - name: SAM Deploy
+        working-directory: infrastructure
+        run: |
+          sam deploy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides \
+              "Stage=dev \
+               KnowledgeBaseId=${{ secrets.KNOWLEDGE_BASE_ID }} \
+               BDAProjectArn=${{ secrets.BDA_PROJECT_ARN }} \
+               GuardrailId=${{ secrets.GUARDRAIL_ID }}"
+
+  deploy-frontend:
+    name: Deploy Frontend (S3)
+    runs-on: ubuntu-latest
+    needs: deploy-backend
+    environment: dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Install & Build
+        working-directory: frontend
+        env:
+          VITE_API_URL: ${{ secrets.API_URL }}
+          VITE_AWS_REGION: us-east-1
+          VITE_USER_POOL_ID: ${{ secrets.COGNITO_USER_POOL_ID }}
+          VITE_USER_POOL_CLIENT_ID: ${{ secrets.COGNITO_APP_CLIENT_ID }}
+        run: |
+          npm ci
+          npm run build
+
+      - name: Deploy to S3
+        run: |
+          aws s3 sync frontend/dist/ s3://${{ secrets.FRONTEND_BUCKET }}/ --delete

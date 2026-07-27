@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - AWS_REGION=us-east-1
+      - STAGE=dev
+      - DOCUMENT_BUCKET=intelliprocess-docs-dev-local
+      - INVOICE_TABLE=IntelliProcess-Invoices-dev
+      - PO_TABLE=IntelliProcess-PurchaseOrders-dev
+      - GR_TABLE=IntelliProcess-GoodsReceipts-dev
+      - CONVERSATION_TABLE=IntelliProcess-Conversations-dev
+      - DOCUMENT_TABLE=IntelliProcess-Documents-dev
+      - KNOWLEDGE_BASE_ID=${KNOWLEDGE_BASE_ID:-PLACEHOLDER}
+      - BDA_PROJECT_ARN=${BDA_PROJECT_ARN:-PLACEHOLDER}
+      - GUARDRAIL_ID=${GUARDRAIL_ID:-PLACEHOLDER}
+      - BEDROCK_MODEL_ID=anthropic.claude-3-sonnet-20240229-v1:0
+      - LOG_LEVEL=DEBUG
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: build
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0

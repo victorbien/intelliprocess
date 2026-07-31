@@ -241,12 +241,12 @@ class TestInvoiceDetail:
 
         assert response.status_code == 403
 
-    async def test_invalid_uuid_returns_422(self):
-        """Non-UUID document_id in path returns 422 validation error."""
+    async def test_invalid_uuid_returns_400(self):
+        """Non-UUID document_id in path returns 400 (our handler normalises all validation errors)."""
         app.dependency_overrides[get_current_user] = lambda: _clerk_user()
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/invoices/not-a-valid-uuid")
 
-        assert response.status_code == 422
+        assert response.status_code == 400

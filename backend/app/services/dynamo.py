@@ -14,23 +14,37 @@ logger = logging.getLogger(__name__)
 
 
 class DynamoClient:
-    """Wrapper around DynamoDB table operations with error handling."""
+    """Wrapper around DynamoDB table operations with error handling.
+
+    The underlying boto3 resource and Table object are created lazily on first use
+    so that importing this module does not require a configured AWS environment.
+    """
 
     def __init__(self, table_name: str):
-        if not table_name:
-            raise ValueError(f"DynamoDB table name cannot be empty. Check environment configuration.")
-        self._resource = boto3.resource("dynamodb", region_name=settings.AWS_REGION)
-        self._table = self._resource.Table(table_name)
         self._table_name = table_name
+        self._resource = None  # Initialized lazily
+        self._table_obj = None  # Initialized lazily
+
+    def _get_table(self):
+        """Return the boto3 Table object, initializing it on first call."""
+        if not self._table_name:
+            raise RuntimeError(
+                "DynamoDB table name is not configured. "
+                "Check INVOICE_TABLE / DOCUMENT_TABLE environment variables."
+            )
+        if self._table_obj is None:
+            self._resource = boto3.resource("dynamodb", region_name=settings.AWS_REGION)
+            self._table_obj = self._resource.Table(self._table_name)
+        return self._table_obj
 
     @property
     def table(self):
-        return self._table
+        return self._get_table()
 
     def put_item(self, item: dict[str, Any]) -> None:
         """Create or overwrite an item."""
         try:
-            self._table.put_item(Item=item)
+            self._get_table().put_item(Item=item)
             logger.info(
                 "DynamoDB put_item success",
                 extra={"table": self._table_name, "key": _extract_key(item)},
@@ -45,7 +59,7 @@ class DynamoClient:
     def get_item(self, key: dict[str, str]) -> dict[str, Any] | None:
         """Get a single item by primary key. Returns None if not found."""
         try:
-            response = self._table.get_item(Key=key)
+            response = self._get_table().get_item(Key=key)
             item = response.get("Item")
             if item is None:
                 logger.debug(
@@ -102,7 +116,7 @@ class DynamoClient:
             kwargs["ExpressionAttributeValues"][":expected"] = expected_current
 
         try:
-            self._table.update_item(**kwargs)
+            self._get_table().update_item(**kwargs)
             logger.info(
                 "DynamoDB status updated",
                 extra={
@@ -161,7 +175,7 @@ class DynamoClient:
             kwargs["ExclusiveStartKey"] = exclusive_start_key
 
         try:
-            response = self._table.query(**kwargs)
+            response = self._get_table().query(**kwargs)
             items = response.get("Items", [])
             last_key = response.get("LastEvaluatedKey")
             return items, last_key
@@ -184,7 +198,7 @@ class DynamoClient:
         """
         counts: dict[str, int] = {}
         try:
-            response = self._table.scan(
+            response = self._get_table().scan(
                 ProjectionExpression="#s",
                 ExpressionAttributeNames={"#s": "status"},
             )
@@ -194,7 +208,7 @@ class DynamoClient:
 
             # Handle pagination for larger datasets
             while "LastEvaluatedKey" in response:
-                response = self._table.scan(
+                response = self._get_table().scan(
                     ProjectionExpression="#s",
                     ExpressionAttributeNames={"#s": "status"},
                     ExclusiveStartKey=response["LastEvaluatedKey"],

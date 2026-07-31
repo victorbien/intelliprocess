@@ -1,12 +1,21 @@
 """IntelliProcess AI — FastAPI Application Entry Point."""
 
 import logging
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 
 from app.config import settings
+
+# ── Local dev: activate moto mocks before any boto3 client is created ─────────
+_USE_MOCKS = settings.STAGE == "dev" and os.environ.get("USE_MOCKS", "true").lower() == "true"
+if _USE_MOCKS:
+    from app.dev_mock import start as _start_mocks
+    _start_mocks()
+# ──────────────────────────────────────────────────────────────────────────────
+
 from app.middleware import CorrelationIdMiddleware, register_exception_handlers
 from app.routers import chat, dashboard, documents, invoices
 

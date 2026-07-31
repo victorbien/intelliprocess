@@ -13,17 +13,31 @@ logger = logging.getLogger(__name__)
 
 
 class S3Client:
-    """Wrapper around S3 operations with presigned URL support."""
+    """Wrapper around S3 operations with presigned URL support.
+
+    The boto3 client is created lazily on first use so importing this module
+    does not require a configured AWS environment at startup.
+    """
 
     def __init__(self, bucket: str | None = None):
-        self._client = boto3.client("s3", region_name=settings.AWS_REGION)
-        self._bucket = bucket or settings.DOCUMENT_BUCKET
-        if not self._bucket:
-            raise ValueError("S3 bucket name cannot be empty. Check DOCUMENT_BUCKET environment variable.")
+        self._bucket = bucket  # Resolved lazily from settings if None
+        self._client_obj = None  # Initialized lazily
+
+    def _get_client(self):
+        """Return the boto3 S3 client, initializing it on first call."""
+        if self._client_obj is None:
+            resolved_bucket = self._bucket or settings.DOCUMENT_BUCKET
+            if not resolved_bucket:
+                raise RuntimeError(
+                    "S3 bucket name is not configured. Check DOCUMENT_BUCKET environment variable."
+                )
+            self._bucket = resolved_bucket
+            self._client_obj = boto3.client("s3", region_name=settings.AWS_REGION)
+        return self._client_obj
 
     @property
     def bucket(self) -> str:
-        return self._bucket
+        return self._bucket or settings.DOCUMENT_BUCKET
 
     def generate_presigned_post(
         self,
@@ -47,7 +61,7 @@ class S3Client:
             ClientError: If S3 presigning fails.
         """
         try:
-            presigned = self._client.generate_presigned_post(
+            presigned = self._get_client().generate_presigned_post(
                 Bucket=self._bucket,
                 Key=key,
                 Fields={"Content-Type": content_type},
@@ -84,7 +98,7 @@ class S3Client:
             Presigned URL string.
         """
         try:
-            url = self._client.generate_presigned_url(
+            url = self._get_client().generate_presigned_url(
                 "get_object",
                 Params={"Bucket": self._bucket, "Key": key},
                 ExpiresIn=expires_in,

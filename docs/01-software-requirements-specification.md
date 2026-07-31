@@ -1,3 +1,8 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
 # Software Requirements Specification (SRS)
 
 ## IntelliProcess AI Platform

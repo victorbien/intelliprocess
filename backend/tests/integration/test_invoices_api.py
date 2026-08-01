@@ -250,3 +250,170 @@ class TestInvoiceDetail:
             response = await client.get("/invoices/not-a-valid-uuid")
 
         assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+class TestInvoiceApprove:
+    """Tests for POST /invoices/{document_id}/approve (AC-3.8.2, AC-3.8.3)."""
+
+    _ESCALATED_DOC_ID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+    def _escalated_item(self) -> dict:
+        return {
+            "documentId": self._ESCALATED_DOC_ID,
+            "fileName": "inv.pdf",
+            "status": "ESCALATED",
+            "uploadedAt": "2026-07-25T10:00:00Z",
+            "uploadedBy": "clerk-001",
+            "s3Key": f"invoices/{self._ESCALATED_DOC_ID}/inv.pdf",
+        }
+
+    @patch("app.routers.invoices._invoice_db")
+    async def test_manager_can_approve_escalated_invoice(self, mock_db):
+        """AC-3.8.2: FINANCE_MANAGER approves an escalated invoice → 200, APPROVED."""
+        mock_db.get_item.return_value = self._escalated_item()
+        mock_db.update_status = MagicMock()
+
+        app.dependency_overrides[get_current_user] = lambda: _manager_user()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/invoices/{self._ESCALATED_DOC_ID}/approve",
+                json={"action": "APPROVE", "comment": "Verified with vendor, correct amount."},
+            )
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["newStatus"] == "APPROVED"
+        assert data["approver"] == "mgr@test.com"
+        mock_db.update_status.assert_called_once()
+        call_kwargs = mock_db.update_status.call_args.kwargs
+        assert call_kwargs["new_status"] == InvoiceStatus.APPROVED
+        assert call_kwargs["expected_current"] == InvoiceStatus.ESCALATED
+
+    @patch("app.routers.invoices._invoice_db")
+    async def test_manager_can_reject_escalated_invoice(self, mock_db):
+        """AC-3.8.3: FINANCE_MANAGER rejects an escalated invoice → 200, REJECTED."""
+        mock_db.get_item.return_value = self._escalated_item()
+        mock_db.update_status = MagicMock()
+
+        app.dependency_overrides[get_current_user] = lambda: _manager_user()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/invoices/{self._ESCALATED_DOC_ID}/approve",
+                json={"action": "REJECT", "comment": "Duplicate invoice, already paid."},
+            )
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["newStatus"] == "REJECTED"
+        call_kwargs = mock_db.update_status.call_args.kwargs
+        assert call_kwargs["new_status"] == InvoiceStatus.REJECTED
+
+    @patch("app.routers.invoices._invoice_db")
+    async def test_clerk_cannot_approve(self, mock_db):
+        """AP_CLERK cannot manually approve/reject — returns 403."""
+        mock_db.get_item.return_value = self._escalated_item()
+
+        app.dependency_overrides[get_current_user] = lambda: _clerk_user()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/invoices/{self._ESCALATED_DOC_ID}/approve",
+                json={"action": "APPROVE", "comment": "I approve this."},
+            )
+
+        assert response.status_code == 403
+        mock_db.update_status.assert_not_called()
+
+    @patch("app.routers.invoices._invoice_db")
+    async def test_returns_400_when_invoice_not_escalated(self, mock_db):
+        """Cannot approve/reject an invoice that is not in ESCALATED status."""
+        item = self._escalated_item()
+        item["status"] = "APPROVED"  # Already approved
+        mock_db.get_item.return_value = item
+
+        app.dependency_overrides[get_current_user] = lambda: _manager_user()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/invoices/{self._ESCALATED_DOC_ID}/approve",
+                json={"action": "APPROVE", "comment": "Trying to approve again."},
+            )
+
+        assert response.status_code == 400
+        assert "ESCALATED" in response.json()["error"]
+
+    @patch("app.routers.invoices._invoice_db")
+    async def test_returns_404_when_invoice_not_found(self, mock_db):
+        """Invoice not found → 404."""
+        mock_db.get_item.return_value = None
+
+        app.dependency_overrides[get_current_user] = lambda: _manager_user()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/invoices/{self._ESCALATED_DOC_ID}/approve",
+                json={"action": "APPROVE", "comment": "Approved."},
+            )
+
+        assert response.status_code == 404
+
+    @patch("app.routers.invoices._invoice_db")
+    async def test_comment_too_short_returns_400(self, mock_db):
+        """Comment shorter than 5 chars fails validation (AC-3.8.2 requires mandatory comment)."""
+        mock_db.get_item.return_value = self._escalated_item()
+
+        app.dependency_overrides[get_current_user] = lambda: _manager_user()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/invoices/{self._ESCALATED_DOC_ID}/approve",
+                json={"action": "APPROVE", "comment": "Ok"},  # 2 chars — too short
+            )
+
+        assert response.status_code == 400
+        mock_db.update_status.assert_not_called()
+
+    @patch("app.routers.invoices._invoice_db")
+    async def test_invalid_action_returns_400(self, mock_db):
+        """Action must be APPROVE or REJECT."""
+        mock_db.get_item.return_value = self._escalated_item()
+
+        app.dependency_overrides[get_current_user] = lambda: _manager_user()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/invoices/{self._ESCALATED_DOC_ID}/approve",
+                json={"action": "MAYBE", "comment": "I am not sure about this."},
+            )
+
+        assert response.status_code == 400
+        mock_db.update_status.assert_not_called()
+
+    @patch("app.routers.invoices._invoice_db")
+    async def test_approval_decision_stored_with_comment(self, mock_db):
+        """The approval record persisted to DynamoDB must contain the reviewer's comment."""
+        mock_db.get_item.return_value = self._escalated_item()
+        mock_db.update_status = MagicMock()
+
+        app.dependency_overrides[get_current_user] = lambda: _manager_user()
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post(
+                f"/invoices/{self._ESCALATED_DOC_ID}/approve",
+                json={"action": "APPROVE", "comment": "All documents verified."},
+            )
+
+        call_kwargs = mock_db.update_status.call_args.kwargs
+        approval = call_kwargs.get("approvalDecision", {})
+        assert approval.get("comment") == "All documents verified."

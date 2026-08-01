@@ -192,3 +192,53 @@ class DocumentListItem(BaseModel):
     kb_sync_status: str | None = Field(None, alias="kbSyncStatus")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Manual Approval Schemas ───────────────────────────────────────────────────
+
+
+class InvoiceApproveRequest(BaseModel):
+    """Request body for POST /invoices/{id}/approve.
+
+    Covers AC-3.8.2 (Approve) and AC-3.8.3 (Reject).
+    """
+
+    action: str = Field(..., alias="action")
+    comment: str = Field(..., min_length=5, max_length=500, alias="comment")
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, v: str) -> str:
+        allowed = {"APPROVE", "REJECT"}
+        if v.upper() not in allowed:
+            raise ValueError(f"action must be one of {sorted(allowed)}")
+        return v.upper()
+
+    model_config = {"populate_by_name": True}
+
+
+class InvoiceApproveResponse(BaseModel):
+    """Response body for POST /invoices/{id}/approve."""
+
+    document_id: str = Field(..., alias="documentId")
+    new_status: str = Field(..., alias="newStatus")
+    approver: str
+    approved_at: str = Field(..., alias="approvedAt")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class ProcessTriggerRequest(BaseModel):
+    """Request body for POST /invoices/process (internal demo/testing endpoint)."""
+
+    s3_key: str = Field(..., alias="s3Key", min_length=1)
+    bucket: str | None = Field(None)
+
+    @field_validator("s3_key")
+    @classmethod
+    def validate_s3_key(cls, v: str) -> str:
+        if not v.startswith("invoices/"):
+            raise ValueError("s3Key must start with 'invoices/'")
+        return v
+
+    model_config = {"populate_by_name": True}

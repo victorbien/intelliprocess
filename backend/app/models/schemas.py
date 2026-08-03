@@ -192,3 +192,82 @@ class DocumentListItem(BaseModel):
     kb_sync_status: str | None = Field(None, alias="kbSyncStatus")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Chat Schemas ─────────────────────────────────────────────────────────────
+
+
+class ChatRequest(BaseModel):
+    """Request body for POST /chat."""
+
+    question: str = Field(..., min_length=1, max_length=1000)
+    session_id: str | None = Field(None, max_length=64, alias="sessionId")
+    category_filter: str | None = Field(None, alias="categoryFilter")
+
+    @field_validator("question")
+    @classmethod
+    def question_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Question cannot be blank.")
+        return v.strip()
+
+    model_config = {"populate_by_name": True}
+
+
+class ChatCitation(BaseModel):
+    """A source reference included in a document-search answer."""
+
+    document_name: str = Field(..., alias="documentName")
+    document_id: str = Field(..., alias="documentId")
+    page_number: int | None = Field(None, alias="pageNumber")
+    relevance_score: float = Field(..., alias="relevanceScore")
+    snippet: str
+    category: str | None = None
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class ChatResponse(BaseModel):
+    """Response body for POST /chat."""
+
+    answer: str
+    citations: list[ChatCitation] = []
+    session_id: str = Field(..., alias="sessionId")
+    source_type: str = Field(..., alias="sourceType")
+    data_snapshot: dict[str, Any] | None = Field(None, alias="dataSnapshot")
+    unavailable: bool | None = None
+    response_time_ms: int = Field(..., alias="responseTimeMs")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class ChatMessage(BaseModel):
+    """A single turn in a conversation history."""
+
+    role: str  # "user" | "assistant"
+    content: str
+    timestamp: str
+    citations: list[ChatCitation] | None = None
+    source_type: str | None = Field(None, alias="sourceType")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class ChatSessionSummary(BaseModel):
+    """Summary of a chat session for the sessions list."""
+
+    session_id: str = Field(..., alias="sessionId")
+    first_message: str = Field(..., alias="firstMessage")
+    last_activity: str = Field(..., alias="lastActivity")
+    message_count: int = Field(..., alias="messageCount")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class ChatSessionDetail(BaseModel):
+    """Full conversation history for a session."""
+
+    session_id: str = Field(..., alias="sessionId")
+    messages: list[ChatMessage]
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}

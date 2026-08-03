@@ -11,6 +11,12 @@ from app.models.schemas import (
     DocumentListItem,
     PaginatedResponse,
     PresignedPostData,
+    ChatRequest,
+    ChatCitation,
+    ChatResponse,
+    ChatMessage,
+    ChatSessionSummary,
+    ChatSessionDetail,
 )
 
 __all__ = [
@@ -29,4 +35,10 @@ __all__ = [
     "DocumentListItem",
     "PaginatedResponse",
     "PresignedPostData",
+    "ChatRequest",
+    "ChatCitation",
+    "ChatResponse",
+    "ChatMessage",
+    "ChatSessionSummary",
+    "ChatSessionDetail",
 ]

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Layout from "./components/common/Layout";
 import DashboardPage from "./pages/DashboardPage";
@@ -5,8 +6,12 @@ import InvoicesPage from "./pages/InvoicesPage";
 import InvoiceDetailPage from "./pages/InvoiceDetailPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import NotFoundPage from "./pages/NotFoundPage";
+import FloatingChatButton from "./components/chat/FloatingChatButton";
+import ChatDrawer from "./components/chat/ChatDrawer";
 
 export default function App() {
+  const [chatOpen, setChatOpen] = useState(false);
+
   return (
     <BrowserRouter>
       <Routes>
@@ -19,6 +24,11 @@ export default function App() {
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>
+
+      {/* Records Assistant widget — rendered outside the route tree so it
+          persists across navigation and sits above all page content */}
+      <FloatingChatButton open={chatOpen} onClick={() => setChatOpen((v) => !v)} />
+      <ChatDrawer open={chatOpen} onClose={() => setChatOpen(false)} />
     </BrowserRouter>
   );
 }

@@ -102,3 +102,35 @@ export async function listDocuments(
   const { data } = await api.get("/documents", { params });
   return data.data;
 }
+
+/* ── Chat / Records Assistant ─────────────────────────────── */
+
+export interface ChatCitation {
+  documentName: string;
+  documentId: string;
+  pageNumber?: number;
+  relevanceScore: number;
+  snippet: string;
+  category?: string;
+}
+
+export interface ChatResponseData {
+  answer: string;
+  citations: ChatCitation[];
+  sessionId: string;
+  sourceType: "structured_query" | "document_search" | "hybrid";
+  dataSnapshot?: Record<string, unknown>;
+  unavailable?: boolean;
+  responseTimeMs: number;
+}
+
+export async function sendChatMessage(
+  question: string,
+  sessionId?: string
+): Promise<ChatResponseData> {
+  const body: Record<string, string> = { question };
+  if (sessionId) body.sessionId = sessionId;
+  const { data } = await api.post("/chat", body);
+  // Backend wraps in { status_code, data: {...} }
+  return data.data as ChatResponseData;
+}

@@ -110,7 +110,7 @@ Stories are grouped by epic and tagged with priority and the functional requirem
 | Priority | P1 |
 | Traces To | FR-AP-005 |
 
-**As an** AP Clerk, **I want to** see the result of the three-way match (Invoice ↔ PO ↔ GR), **so that** I have confidence the invoice is legitimate before it proceeds.
+**As an** AP Clerk, **I want to** see the result of the three-way match (Invoice <-> PO <-> GR), **so that** I have confidence the invoice is legitimate before it proceeds.
 
 ### US-3.6: Automatic Approval of Valid Invoices
 | Attribute | Value |

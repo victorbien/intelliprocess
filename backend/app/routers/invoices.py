@@ -1,9 +1,11 @@
 """Invoice processing endpoints.
 
 Handles:
-- POST /invoices/upload — Generate presigned URL for invoice upload
-- GET /invoices — List invoices (filtered by user role)
-- GET /invoices/{document_id} — Get full invoice detail
+- POST /invoices/upload            — Generate presigned URL for invoice upload
+- GET  /invoices                   — List invoices (filtered by user role)
+- GET  /invoices/{document_id}     — Get full invoice detail
+- POST /invoices/{document_id}/approve  — Manually approve or reject a escalated invoice
+- POST /invoices/process           — S3-event processing trigger (internal)
 """
 
 import base64
@@ -25,14 +27,18 @@ from app.models.enums import (
 )
 from app.models.schemas import (
     ApiResponse,
+    InvoiceApproveRequest,
+    InvoiceApproveResponse,
     InvoiceDetailResponse,
     InvoiceListItem,
     InvoiceUploadRequest,
     InvoiceUploadResponse,
     PaginatedResponse,
     PresignedPostData,
+    ProcessTriggerRequest,
 )
 from app.services.dynamo import DynamoClient
+from app.services.processor import process_invoice
 from app.services.s3 import S3Client
 
 logger = logging.getLogger(__name__)
@@ -241,6 +247,108 @@ async def get_invoice_detail(
             processingDurationMs=_to_int(item.get("processingDurationMs")),
         )
     )
+
+
+@router.post(
+    "/{document_id}/approve",
+    response_model=ApiResponse[InvoiceApproveResponse],
+)
+async def approve_invoice(
+    document_id: Annotated[
+        str,
+        Path(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"),
+    ],
+    body: InvoiceApproveRequest,
+    user: Annotated[
+        CurrentUser,
+        Depends(require_role(UserRole.FINANCE_MANAGER, UserRole.ADMIN)),
+    ],
+):
+    """Manually approve or reject an escalated invoice.
+
+    Only FINANCE_MANAGER and ADMIN roles can call this endpoint (AC-3.8.2, AC-3.8.3).
+    The invoice must be in ESCALATED status.
+    A mandatory comment (≥5 chars) is required for audit purposes.
+    """
+    item = _invoice_db.get_item({"documentId": document_id})
+    if not item:
+        raise AppError("Invoice not found.", status_code=404)
+
+    if item.get("status") != InvoiceStatus.ESCALATED:
+        raise AppError(
+            f"Invoice cannot be reviewed — current status is '{item.get('status')}'. "
+            "Only ESCALATED invoices can be manually approved or rejected.",
+            status_code=400,
+        )
+
+    is_approve = body.action == "APPROVE"
+    new_status = InvoiceStatus.APPROVED if is_approve else InvoiceStatus.REJECTED
+    now = datetime.now(timezone.utc).isoformat()
+
+    approval_record = {
+        "decision":   body.action,
+        "approver":   user.email if user.email else user.user_id,
+        "approvedAt": now,
+        "comment":    body.comment,
+    }
+
+    logger.info(
+        "Manual invoice review",
+        extra={
+            "documentId": document_id,
+            "action": body.action,
+            "reviewer": user.user_id,
+            "newStatus": new_status,
+        },
+    )
+
+    _invoice_db.update_status(
+        document_id=document_id,
+        new_status=new_status,
+        expected_current=InvoiceStatus.ESCALATED,
+        approvalDecision=approval_record,
+    )
+
+    return ApiResponse(
+        data=InvoiceApproveResponse(
+            documentId=document_id,
+            newStatus=new_status,
+            approver=user.email if user.email else user.user_id,
+            approvedAt=now,
+        )
+    )
+
+
+@router.post(
+    "/process",
+    status_code=202,
+    include_in_schema=False,   # Internal endpoint — not in public API docs
+)
+async def trigger_processing(
+    payload: ProcessTriggerRequest,
+    user: Annotated[
+        CurrentUser,
+        Depends(require_role(UserRole.ADMIN)),
+    ],
+):
+    """Manually trigger invoice processing for a specific document.
+
+    In production this is invoked by the S3 event on the InvoiceProcessor Lambda.
+    This endpoint allows demo/testing of the processing pipeline via HTTP.
+
+    Request body: { "s3Key": "invoices/<id>/<filename>", "bucket": "..." (optional) }
+    """
+    bucket = payload.bucket or settings.DOCUMENT_BUCKET
+    s3_key = payload.s3_key
+
+    logger.info(
+        "Manual pipeline trigger",
+        extra={"bucket": bucket, "s3Key": s3_key, "userId": user.user_id},
+    )
+
+    process_invoice(bucket=bucket, s3_key=s3_key)
+
+    return {"message": "Processing pipeline triggered.", "s3Key": s3_key}
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────

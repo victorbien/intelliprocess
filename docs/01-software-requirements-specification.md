@@ -3,11 +3,12 @@ output:
   pdf_document: default
   html_document: default
 ---
+
 # Software Requirements Specification (SRS)
+# Group 6
+## Project: IntelliProcess AI
 
-## IntelliProcess AI Platform
-
-### Integrated Accounts Payable Automation & Intelligent Records Assistant
+**An Autonomous Accounts Payable Agent with an Intelligent Records Assistant**
 
 ---
 
@@ -61,18 +62,15 @@ IntelliProcess AI is a greenfield cloud-native application. It does not integrat
 
 | ID | Function | Priority |
 |----|----------|----------|
-| F1 | Invoice document upload and storage | MVP |
-| F2 | Automated invoice data extraction | MVP |
-| F3 | PO and Goods Receipt matching | MVP |
-| F4 | Rule-based invoice approval/escalation | MVP |
-| F5 | Natural language document search | MVP |
-| F6 | Summarized answers with source citations | MVP |
-| F7 | Document ingestion and indexing | MVP |
-| F8 | Processing status dashboard | MVP |
-| F9 | Advanced exception workflow (reassignment, SLA tracking, notifications) | Deferred |
-| F10 | Email notifications | Deferred |
-| F11 | Multi-tenant support | Deferred |
-| F12 | Audit trail and compliance reporting | Deferred |
+| F1 | Document Upload & Storage | MVP |
+| F2 | Intelligent Document Processing | MVP |
+| F3 | Three-Way Matching | MVP |
+| F4 | Exception Handling | MVP |
+| F5 | Dashboard & Monitoring | MVP |
+| F6 | AI Assistant | MVP |
+| F7 | Email notifications | Deferred |
+| F8 | Multi-tenant support | Deferred |
+| F9 | Audit & Compliance Reporting | Deferred |
 
 ### 2.3 User Classes
 
@@ -228,3 +226,4 @@ Not a primary concern for MVP. The serverless architecture inherently supports s
 | Version | Date | Author | Description |
 |---------|------|--------|-------------|
 | 1.0 | 2026-07-27 | Capstone Team | Initial SRS |
+| 1.1 | 2026-07-31 | Capstone Team | Revised Product Functions |

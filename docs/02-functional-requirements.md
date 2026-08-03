@@ -118,7 +118,7 @@ All functional requirements are tagged with:
 | Attribute | Value |
 |-----------|-------|
 | Priority | P1 |
-| Description | The system shall perform three-way matching (Invoice ↔ PO ↔ Goods Receipt) |
+| Description | The system shall perform three-way matching (Invoice <-> PO <-> Goods Receipt) |
 | Business Rule | All three documents must align on: vendor, PO number, quantities (within tolerance), amounts (within 5%) |
 | Output | THREE_WAY_MATCH_PASS or THREE_WAY_MATCH_FAIL with specific discrepancy details |
 
@@ -127,7 +127,7 @@ All functional requirements are tagged with:
 |-----------|-------|
 | Priority | P1 |
 | Description | The system shall automatically approve invoices that pass all validation rules |
-| Approval Rules | (1) Three-way match passes, (2) Invoice amount ≤ $10,000, (3) Overall extraction confidence ≥ 0.85, (4) Vendor is in approved vendor list |
+| Approval Rules | (1) Three-way match passes, (2) Invoice amount <= $10,000, (3) Overall extraction confidence => 0.85, (4) Vendor is in approved vendor list |
 | Business Rule | All four conditions must be true for auto-approval |
 | Output | Invoice status set to APPROVED with approval timestamp and "AUTO" approver |
 

@@ -1,159 +1,67 @@
-import { useEffect, useState } from "react";
-import { api } from "../services/api";
+/** Processing dashboard (task 5.5, AC-3.9.x). */
 
-interface Stats {
-  totalInvoices: number;
-  statusCounts: Record<string, number>;
-  autoApprovalRate: number;
-  avgProcessingTimeSec: number;
-  recentActivity: Array<{
-    documentId: string;
-    fileName: string;
-    action: string;
-    timestamp: string;
-    actor: string;
-  }>;
-}
+import { useCallback, useEffect, useState } from "react";
 
-const STATUS_COLOUR: Record<string, string> = {
-  APPROVED:   "text-green-600",
-  ESCALATED:  "text-orange-500",
-  REJECTED:   "text-red-500",
-  ERROR:      "text-red-400",
-  PROCESSING: "text-yellow-500",
-  UPLOADED:   "text-blue-500",
-};
+import StatsCards from "@/components/dashboard/StatsCards";
+import ProcessingSummary from "@/components/dashboard/ProcessingSummary";
+import Spinner from "@/components/common/Spinner";
+import ErrorAlert from "@/components/common/ErrorAlert";
+import { dashboardApi } from "@/services/api";
+import { ApiError, type DashboardStats } from "@/services/types";
+import { logger } from "@/services/logger";
 
 export default function DashboardPage() {
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [error, setError] = useState("");
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await dashboardApi.stats();
+      setStats(data);
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Failed to load dashboard.";
+      logger.error("dashboard", "Stats load failed", err);
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    api
-      .get("/dashboard/stats")
-      .then(({ data }) => setStats(data.data))
-      .catch((err) => {
-        const msg = err?.response?.data?.error ?? "Dashboard not yet available.";
-        setError(msg);
-      });
-  }, []);
+    void load();
+  }, [load]);
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-gray-800">Dashboard</h1>
-
-      {error && (
-        <div className="bg-yellow-50 border border-yellow-200 rounded p-4 text-sm text-yellow-800">
-          <strong>Note:</strong> {error}
-          <br />
-          <span className="text-xs text-yellow-600">
-            Dashboard stats are part of Module 4. The API endpoint is not yet implemented.
-          </span>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-slate-800">Dashboard</h1>
+          <p className="text-sm text-slate-500">Invoice processing summary (refreshed on load).</p>
         </div>
-      )}
+        <button
+          type="button"
+          onClick={() => void load()}
+          className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-100"
+        >
+          Refresh
+        </button>
+      </div>
 
-      {stats && (
+      {loading ? (
+        <div className="flex min-h-[30vh] items-center justify-center">
+          <Spinner label="Loading dashboard" />
+        </div>
+      ) : error ? (
+        <ErrorAlert message={error} onRetry={() => void load()} />
+      ) : stats ? (
         <>
-          {/* Stat cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <StatCard label="Total Invoices" value={stats.totalInvoices} />
-            <StatCard label="Auto-Approval Rate" value={`${stats.autoApprovalRate}%`} />
-            <StatCard label="Avg Processing" value={`${stats.avgProcessingTimeSec}s`} />
-            <StatCard
-              label="Escalated"
-              value={stats.statusCounts.ESCALATED ?? 0}
-              highlight="orange"
-            />
-          </div>
-
-          {/* Status breakdown */}
-          <div className="bg-white border rounded-lg shadow-sm p-5">
-            <h2 className="text-sm font-semibold text-gray-700 mb-3">Status Breakdown</h2>
-            <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
-              {Object.entries(stats.statusCounts).map(([status, count]) => (
-                <div key={status} className="text-center">
-                  <div className={`text-2xl font-bold ${STATUS_COLOUR[status] ?? "text-gray-600"}`}>
-                    {count}
-                  </div>
-                  <div className="text-[10px] text-gray-400 mt-0.5">{status}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Recent activity */}
-          {stats.recentActivity?.length > 0 && (
-            <div className="bg-white border rounded-lg shadow-sm p-5">
-              <h2 className="text-sm font-semibold text-gray-700 mb-3">Recent Activity</h2>
-              <ul className="space-y-1.5">
-                {stats.recentActivity.map((a, i) => (
-                  <li key={i} className="text-xs text-gray-600 flex gap-2">
-                    <span className="text-gray-400 tabular-nums">
-                      {new Date(a.timestamp).toLocaleTimeString()}
-                    </span>
-                    <span className="font-medium">{a.fileName}</span>
-                    <span>{a.action}</span>
-                    <span className="text-gray-400">by {a.actor}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          <StatsCards stats={stats} />
+          <ProcessingSummary activity={stats.recentActivity} />
         </>
-      )}
-
-      {/* Module status panel */}
-      {!stats && !error && (
-        <p className="text-gray-500 text-sm">Loading…</p>
-      )}
-
-      <ModuleStatus />
-    </div>
-  );
-}
-
-function StatCard({
-  label,
-  value,
-  highlight,
-}: {
-  label: string;
-  value: string | number;
-  highlight?: string;
-}) {
-  const valClass =
-    highlight === "orange" ? "text-orange-500" :
-    highlight === "red"    ? "text-red-500" :
-    "text-gray-800";
-  return (
-    <div className="bg-white border rounded-lg p-4 shadow-sm">
-      <div className={`text-2xl font-bold ${valClass}`}>{value}</div>
-      <div className="text-xs text-gray-500 mt-1">{label}</div>
-    </div>
-  );
-}
-
-function ModuleStatus() {
-  const modules = [
-    { name: "Module 1: Shared (Auth, Upload, Storage)", done: true },
-    { name: "Module 2: AP Invoice Processing Engine",   done: false },
-    { name: "Module 3: RAG Records Assistant",          done: false },
-    { name: "Module 4: Dashboard & Admin",               done: false },
-    { name: "Module 5: Frontend UI",                    done: false },
-  ];
-  return (
-    <div className="bg-white border rounded-lg shadow-sm p-5">
-      <h2 className="text-sm font-semibold text-gray-700 mb-3">Implementation Progress</h2>
-      <ul className="space-y-2">
-        {modules.map((m) => (
-          <li key={m.name} className="flex items-center gap-2 text-sm">
-            <span className={m.done ? "text-green-500" : "text-gray-300"}>
-              {m.done ? "✅" : "⬜"}
-            </span>
-            <span className={m.done ? "text-gray-700" : "text-gray-400"}>{m.name}</span>
-          </li>
-        ))}
-      </ul>
+      ) : null}
     </div>
   );
 }

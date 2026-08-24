@@ -7,8 +7,11 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { sendChatMessage } from "../../services/api";
-import MessageBubble, { TypingIndicator, type Message } from "./MessageBubble";
+import { chatApi } from "@/services/api";
+import { ApiError } from "@/services/types";
+import { logger } from "@/services/logger";
+import MessageBubble, { TypingIndicator } from "./MessageBubble";
+import type { ChatMessage as Message } from "./types";
 
 const EXAMPLE_QUESTIONS = [
   "How many invoices are escalated?",
@@ -27,9 +30,9 @@ export default function ChatWindow() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Scroll to bottom whenever messages change
+  // Scroll to bottom whenever messages change (guarded for jsdom/tests).
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
   }, [messages, loading]);
 
   async function handleSend(question: string) {
@@ -44,28 +47,31 @@ export default function ChatWindow() {
       id: crypto.randomUUID(),
       role: "user",
       content: trimmed,
+      timestamp: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, userMsg]);
     setLoading(true);
 
     try {
-      const response = await sendChatMessage(trimmed, sessionId);
+      const response = await chatApi.ask(trimmed, sessionId);
 
       // Persist sessionId for the whole conversation
-      if (!sessionId) setSessionId(response.sessionId);
+      if (response.sessionId) setSessionId(response.sessionId);
 
       const assistantMsg: Message = {
         id: crypto.randomUUID(),
         role: "assistant",
         content: response.answer,
+        timestamp: new Date().toISOString(),
         citations: response.citations,
+        sourceType: response.sourceType,
         dataSnapshot: response.dataSnapshot,
-        unavailable: response.unavailable,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : "Something went wrong. Please try again.";
+        err instanceof ApiError ? err.message : "Something went wrong. Please try again.";
+      logger.error("chat", "ChatWindow send failed", err);
       setError(message);
     } finally {
       setLoading(false);

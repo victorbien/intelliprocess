@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 _PO_AMOUNT_TOLERANCE = 0.05   # 5 %  — FR-AP-003
 _GR_QTY_TOLERANCE    = 0.02   # 2 %  — FR-AP-004
 
+# Small epsilon so the tolerance boundary is inclusive and immune to floating-
+# point rounding (e.g. 658.80 * 1.05 yields a variance of 0.05000000000000004,
+# which must still count as "within 5%").
+_FLOAT_EPSILON = 1e-9
+
 # ── Service clients (lazy) ────────────────────────────────────────────────────
 
 _po_db = DynamoClient(settings.PO_TABLE)
@@ -107,7 +112,7 @@ def match_purchase_order(
         else 1.0
     )
 
-    if variance_pct > _PO_AMOUNT_TOLERANCE:
+    if variance_pct > _PO_AMOUNT_TOLERANCE + _FLOAT_EPSILON:
         discrepancies.append(
             f"Amount variance {variance_pct * 100:.1f}%: "
             f"PO ${po_amount:.2f} vs Invoice ${invoice_amount:.2f}"

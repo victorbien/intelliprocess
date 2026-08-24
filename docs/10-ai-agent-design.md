@@ -2,104 +2,121 @@
 
 ## IntelliProcess AI Platform
 
----
+------------------------------------------------------------------------
 
 ## 1. Agent Architecture Overview
 
-The platform uses two specialized AI agents orchestrated by AWS AgentCore. Each agent has distinct responsibilities, tools, and reasoning patterns.
+The platform uses two specialized AI agents orchestrated by AWS
+AgentCore. Each agent has distinct responsibilities, tools, and
+reasoning patterns.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    AWS AgentCore                                  │
-│                                                                  │
-│  ┌─────────────────────────────┐  ┌───────────────────────────┐│
-│  │   AP Invoice Agent          │  │   Records Search Agent     ││
-│  │                             │  │                           ││
-│  │   Model: Claude 3 Sonnet    │  │   Model: Claude 3 Sonnet  ││
-│  │   Style: Tool-use agent     │  │   Style: RAG agent        ││
-│  │   Tools: 4 custom tools     │  │   Tools: KB Retrieve      ││
-│  │   Memory: None (stateless)  │  │   Memory: Session (5 msg) ││
-│  │                             │  │                           ││
-│  │   Responsibilities:         │  │   Responsibilities:       ││
-│  │   - Invoice field analysis  │  │   - Query understanding   ││
-│  │   - PO/GR matching logic    │  │   - Document retrieval    ││
-│  │   - Approval reasoning      │  │   - Answer synthesis      ││
-│  │   - Escalation decisions    │  │   - Citation assembly     ││
-│  └─────────────────────────────┘  └───────────────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
-```
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                    AWS AgentCore                                  │
+    │                                                                  │
+    │  ┌─────────────────────────────┐  ┌───────────────────────────┐│
+    │  │   AP Invoice Agent          │  │   Records Search Agent     ││
+    │  │                             │  │                           ││
+    │  │   Model: Claude 3 Sonnet    │  │   Model: Claude 3 Sonnet  ││
+    │  │   Style: Tool-use agent     │  │   Style: RAG agent        ││
+    │  │   Tools: 4 custom tools     │  │   Tools: KB Retrieve      ││
+    │  │   Memory: None (stateless)  │  │   Memory: Session (5 msg) ││
+    │  │                             │  │                           ││
+    │  │   Responsibilities:         │  │   Responsibilities:       ││
+    │  │   - Invoice field analysis  │  │   - Query understanding   ││
+    │  │   - PO/GR matching logic    │  │   - Document retrieval    ││
+    │  │   - Approval reasoning      │  │   - Answer synthesis      ││
+    │  │   - Escalation decisions    │  │   - Citation assembly     ││
+    │  └─────────────────────────────┘  └───────────────────────────┘│
+    └─────────────────────────────────────────────────────────────────┘
 
 ### Why Two Agents (Not One)
 
-| Consideration | Single Agent | Two Specialized Agents |
-|---------------|-------------|----------------------|
-| Prompt complexity | Very long, mixed concerns | Focused, shorter prompts |
-| Tool surface | 5+ tools, confusing | 3-4 tools each, clear |
-| Testing | Hard to isolate failures | Test each independently |
-| Cost | Every call loads all context | Lighter per invocation |
-| Latency | Larger prompt = slower | Smaller prompt = faster |
+  ------------------------------------------------------------------------
+  Consideration         Single Agent       Two Specialized Agents
+  --------------------- ------------------ -------------------------------
+  Prompt complexity     Very long, mixed   Focused, shorter prompts
+                        concerns           
 
-**Decision**: Two agents. The AP Agent is invoked only during invoice processing (async). The Records Agent is invoked only during chat queries (sync). They never need to coordinate in real-time.
+  Tool surface          5+ tools,          3-4 tools each, clear
+                        confusing          
 
----
+  Testing               Hard to isolate    Test each independently
+                        failures           
+
+  Cost                  Every call loads   Lighter per invocation
+                        all context        
+
+  Latency               Larger prompt =    Smaller prompt = faster
+                        slower             
+  ------------------------------------------------------------------------
+
+**Decision**: Two agents. The AP Agent is invoked only during invoice
+processing (async). The Records Agent is invoked only during chat
+queries (sync). They never need to coordinate in real-time.
+
+------------------------------------------------------------------------
 
 ## 2. AP Invoice Agent
 
 ### 2.1 Agent Identity
 
-| Property | Value |
-|----------|-------|
-| Name | AP Invoice Processing Agent |
-| ID | `ap-invoice-agent` |
-| Model | Claude 3 Sonnet (anthropic.claude-3-sonnet-20240229-v1:0) |
-| Temperature | 0.0 (deterministic for business logic) |
-| Max Tokens | 2048 |
-| Invocation | Asynchronous (from InvoiceProcessor Lambda) |
-| Timeout | 120 seconds |
+  Property      Value
+  ------------- -----------------------------------------------------------
+  Name          AP Invoice Processing Agent
+  ID            `ap-invoice-agent`
+  Model         Claude 3 Sonnet (anthropic.claude-3-sonnet-20240229-v1:0)
+  Temperature   0.0 (deterministic for business logic)
+  Max Tokens    2048
+  Invocation    Asynchronous (from InvoiceProcessor Lambda)
+  Timeout       120 seconds
 
 ### 2.2 Agent Reasoning Pattern
 
-The AP Agent follows a **sequential tool-use pattern** — it executes a predefined workflow rather than free-form reasoning:
+The AP Agent follows a **sequential tool-use pattern** --- it executes a
+predefined workflow rather than free-form reasoning:
 
-```
-┌────────────────────────────────────────────────────────────┐
-│                AP Agent Reasoning Loop                       │
-│                                                            │
-│  Input: documentId + extraction results                    │
-│                                                            │
-│  Step 1: Analyze extraction quality                        │
-│           → Check confidence scores                        │
-│           → Identify low-confidence fields                 │
-│                                                            │
-│  Step 2: Call match_purchase_order tool                     │
-│           → Input: PO reference, vendor, amount            │
-│           → Output: PO match result                        │
-│                                                            │
-│  Step 3: Call match_goods_receipt tool                      │
-│           → Input: PO number from Step 2                   │
-│           → Output: GR match result                        │
-│                                                            │
-│  Step 4: Call evaluate_approval_rules tool                  │
-│           → Input: extraction + PO match + GR match        │
-│           → Output: approval decision                      │
-│                                                            │
-│  Step 5: Return structured decision                        │
-│           → APPROVED or ESCALATED with full reasoning      │
-└────────────────────────────────────────────────────────────┘
-```
+    ┌────────────────────────────────────────────────────────────┐
+    │                AP Agent Reasoning Loop                       │
+    │                                                            │
+    │  Input: documentId + extraction results                    │
+    │                                                            │
+    │  Step 1: Analyze extraction quality                        │
+    │           → Check confidence scores                        │
+    │           → Identify low-confidence fields                 │
+    │                                                            │
+    │  Step 2: Call match_purchase_order tool                     │
+    │           → Input: PO reference, vendor, amount            │
+    │           → Output: PO match result                        │
+    │                                                            │
+    │  Step 3: Call match_goods_receipt tool                      │
+    │           → Input: PO number from Step 2                   │
+    │           → Output: GR match result                        │
+    │                                                            │
+    │  Step 4: Call evaluate_approval_rules tool                  │
+    │           → Input: extraction + PO match + GR match        │
+    │           → Output: approval decision                      │
+    │                                                            │
+    │  Step 5: Return structured decision                        │
+    │           → APPROVED or ESCALATED with full reasoning      │
+    └────────────────────────────────────────────────────────────┘
 
 ### 2.3 Tools
 
 #### Tool 1: `match_purchase_order`
 
-| Property | Value |
-|----------|-------|
-| Description | Looks up a Purchase Order by number and compares it against invoice data |
-| Input Schema | `{ "poNumber": string, "vendorName": string, "invoiceAmount": number }` |
-| Output | `{ "status": "MATCHED|PARTIAL_MATCH|NO_MATCH", "poData": {...}, "discrepancies": [...] }` |
-| Implementation | Lambda function querying DynamoDB PO table |
+  -------------------------------------------------------------------------------------------------------------------------------------
+  Property                                  Value
+  ----------------------------------------- -------------------------------------------------------------------------------------------
+  Description                               Looks up a Purchase Order by number and compares it against invoice data
 
-```python
+  Input Schema                              `{ "poNumber": string, "vendorName": string, "invoiceAmount": number }`
+
+  Output                                    `{ "status": "MATCHED|PARTIAL_MATCH|NO_MATCH", "poData": {...}, "discrepancies": [...] }`
+
+  Implementation                            Lambda function querying DynamoDB PO table
+  -------------------------------------------------------------------------------------------------------------------------------------
+
+``` python
 # tools/match_po.py
 def match_purchase_order(po_number: str, vendor_name: str, invoice_amount: float) -> dict:
     """Match invoice against Purchase Order."""
@@ -141,14 +158,19 @@ def match_purchase_order(po_number: str, vendor_name: str, invoice_amount: float
 
 #### Tool 2: `match_goods_receipt`
 
-| Property | Value |
-|----------|-------|
-| Description | Verifies that goods/services have been received for a given PO |
-| Input Schema | `{ "poNumber": string, "invoicedQuantity": number }` |
-| Output | `{ "status": "CONFIRMED|PARTIAL|NOT_RECEIVED", "grData": {...}, "discrepancies": [...] }` |
-| Implementation | Lambda function querying DynamoDB GR table |
+  -------------------------------------------------------------------------------------------------------------------------------------
+  Property                                  Value
+  ----------------------------------------- -------------------------------------------------------------------------------------------
+  Description                               Verifies that goods/services have been received for a given PO
 
-```python
+  Input Schema                              `{ "poNumber": string, "invoicedQuantity": number }`
+
+  Output                                    `{ "status": "CONFIRMED|PARTIAL|NOT_RECEIVED", "grData": {...}, "discrepancies": [...] }`
+
+  Implementation                            Lambda function querying DynamoDB GR table
+  -------------------------------------------------------------------------------------------------------------------------------------
+
+``` python
 # tools/match_gr.py
 def match_goods_receipt(po_number: str, invoiced_quantity: int) -> dict:
     """Verify goods receipt against PO."""
@@ -190,14 +212,19 @@ def match_goods_receipt(po_number: str, invoiced_quantity: int) -> dict:
 
 #### Tool 3: `evaluate_approval_rules`
 
-| Property | Value |
-|----------|-------|
-| Description | Evaluates business rules to determine auto-approval or escalation |
-| Input Schema | `{ "totalAmount": number, "overallConfidence": number, "vendorName": string, "threeWayMatchStatus": string, "discrepancies": [...] }` |
-| Output | `{ "decision": "APPROVE|ESCALATE", "reason": string, "escalateTo": string|null, "rulesResults": [...] }` |
-| Implementation | Pure logic function (no external calls) |
+  ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  Property                                  Value
+  ----------------------------------------- ---------------------------------------------------------------------------------------------------------------------------------------
+  Description                               Evaluates business rules to determine auto-approval or escalation
 
-```python
+  Input Schema                              `{ "totalAmount": number, "overallConfidence": number, "vendorName": string, "threeWayMatchStatus": string, "discrepancies": [...] }`
+
+  Output                                    `{ "decision": "APPROVE|ESCALATE", "reason": string, "escalateTo": string|null, "rulesResults": [...] }`
+
+  Implementation                            Pure logic function (no external calls)
+  ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+``` python
 # tools/evaluate_rules.py
 AMOUNT_THRESHOLD = 10000.00
 CONFIDENCE_THRESHOLD = 0.85
@@ -278,16 +305,25 @@ def evaluate_approval_rules(total_amount: float, overall_confidence: float,
 
 #### Tool 4: `get_extraction_summary`
 
-| Property | Value |
-|----------|-------|
-| Description | Retrieves and summarizes the extraction results for agent reasoning |
-| Input Schema | `{ "documentId": string }` |
-| Output | Extraction data with confidence analysis |
-| Implementation | DynamoDB read + confidence analysis |
+  -----------------------------------------------------------------------
+  Property                                  Value
+  ----------------------------------------- -----------------------------
+  Description                               Retrieves and summarizes the
+                                            extraction results for agent
+                                            reasoning
+
+  Input Schema                              `{ "documentId": string }`
+
+  Output                                    Extraction data with
+                                            confidence analysis
+
+  Implementation                            DynamoDB read + confidence
+                                            analysis
+  -----------------------------------------------------------------------
 
 ### 2.4 Agent Invocation Pattern
 
-```python
+``` python
 # How the InvoiceProcessor Lambda invokes the AP Agent
 def invoke_ap_agent(document_id: str, extraction: dict) -> dict:
     """Invoke the AP Invoice Agent via AgentCore."""
@@ -326,63 +362,61 @@ Please:
     return parse_agent_decision(response)
 ```
 
----
+------------------------------------------------------------------------
 
 ## 3. Records Search Agent
 
 ### 3.1 Agent Identity
 
-| Property | Value |
-|----------|-------|
-| Name | Records Search Assistant Agent |
-| ID | `records-search-agent` |
-| Model | Claude 3 Sonnet (anthropic.claude-3-sonnet-20240229-v1:0) |
-| Temperature | 0.3 (some creativity in synthesis, grounded in facts) |
-| Max Tokens | 1024 |
-| Invocation | Synchronous (from ChatHandler Lambda) |
-| Timeout | 30 seconds |
-| Knowledge Base | Integrated via AgentCore KB association |
+  Property         Value
+  ---------------- -----------------------------------------------------------
+  Name             Records Search Assistant Agent
+  ID               `records-search-agent`
+  Model            Claude 3 Sonnet (anthropic.claude-3-sonnet-20240229-v1:0)
+  Temperature      0.3 (some creativity in synthesis, grounded in facts)
+  Max Tokens       1024
+  Invocation       Synchronous (from ChatHandler Lambda)
+  Timeout          30 seconds
+  Knowledge Base   Integrated via AgentCore KB association
 
 ### 3.2 Agent Reasoning Pattern
 
 The Records Agent follows a **Retrieve-then-Generate pattern** (RAG):
 
-```
-┌────────────────────────────────────────────────────────────┐
-│             Records Agent Reasoning Loop                    │
-│                                                            │
-│  Input: user question + conversation history + filters     │
-│                                                            │
-│  Step 1: Understand the query                              │
-│           → Resolve pronouns from history                  │
-│           → Identify topic and intent                      │
-│           → Determine if answerable from org records       │
-│                                                            │
-│  Step 2: Retrieve relevant documents                       │
-│           → Call Knowledge Base (semantic search)           │
-│           → Apply category filter if specified             │
-│           → Get top-k chunks (k=5)                        │
-│                                                            │
-│  Step 3: Evaluate retrieval quality                        │
-│           → Are chunks relevant to the question?           │
-│           → If no relevant chunks → "I don't know" path   │
-│                                                            │
-│  Step 4: Synthesize answer                                 │
-│           → Generate response from retrieved context       │
-│           → Include specific facts and details             │
-│           → Maintain professional tone                     │
-│                                                            │
-│  Step 5: Attach citations                                  │
-│           → Map answer claims to source chunks             │
-│           → Include document name, page, relevance         │
-│                                                            │
-│  Output: answer + citations array                          │
-└────────────────────────────────────────────────────────────┘
-```
+    ┌────────────────────────────────────────────────────────────┐
+    │             Records Agent Reasoning Loop                    │
+    │                                                            │
+    │  Input: user question + conversation history + filters     │
+    │                                                            │
+    │  Step 1: Understand the query                              │
+    │           → Resolve pronouns from history                  │
+    │           → Identify topic and intent                      │
+    │           → Determine if answerable from org records       │
+    │                                                            │
+    │  Step 2: Retrieve relevant documents                       │
+    │           → Call Knowledge Base (semantic search)           │
+    │           → Apply category filter if specified             │
+    │           → Get top-k chunks (k=5)                        │
+    │                                                            │
+    │  Step 3: Evaluate retrieval quality                        │
+    │           → Are chunks relevant to the question?           │
+    │           → If no relevant chunks → "I don't know" path   │
+    │                                                            │
+    │  Step 4: Synthesize answer                                 │
+    │           → Generate response from retrieved context       │
+    │           → Include specific facts and details             │
+    │           → Maintain professional tone                     │
+    │                                                            │
+    │  Step 5: Attach citations                                  │
+    │           → Map answer claims to source chunks             │
+    │           → Include document name, page, relevance         │
+    │                                                            │
+    │  Output: answer + citations array                          │
+    └────────────────────────────────────────────────────────────┘
 
 ### 3.3 Knowledge Base Configuration
 
-```json
+``` json
 {
   "knowledgeBaseId": "KB_XXXXXXXXXX",
   "name": "IntelliProcess-Knowledge-Base",
@@ -419,17 +453,17 @@ The Records Agent follows a **Retrieve-then-Generate pattern** (RAG):
 
 ### 3.4 Retrieval Configuration
 
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Top K results | 5 | Balance between context breadth and token cost |
-| Chunk size | 300 tokens | Standard for paragraph-level retrieval |
-| Overlap | 20% | Preserve context at chunk boundaries |
-| Similarity metric | Cosine | Standard for text embeddings |
-| Minimum score threshold | 0.5 | Filter out irrelevant chunks |
+  Parameter                 Value        Rationale
+  ------------------------- ------------ ------------------------------------------------
+  Top K results             5            Balance between context breadth and token cost
+  Chunk size                300 tokens   Standard for paragraph-level retrieval
+  Overlap                   20%          Preserve context at chunk boundaries
+  Similarity metric         Cosine       Standard for text embeddings
+  Minimum score threshold   0.5          Filter out irrelevant chunks
 
 ### 3.5 Guardrails Configuration
 
-```json
+``` json
 {
   "guardrailId": "GUARDRAIL_XXXXXXXXXX",
   "name": "IntelliProcess-Records-Guardrail",
@@ -463,7 +497,7 @@ The Records Agent follows a **Retrieve-then-Generate pattern** (RAG):
 
 ### 3.6 Agent Invocation Pattern
 
-```python
+``` python
 # How the ChatHandler Lambda invokes the Records Agent
 def invoke_records_agent(question: str, history: list, category_filter: str = None) -> dict:
     """Invoke the Records Search Agent via AgentCore."""
@@ -535,15 +569,18 @@ def extract_citations(raw_citations: list) -> list:
     return citations[:5]  # Limit to top 5 citations
 ```
 
----
+------------------------------------------------------------------------
 
 ## 4. MVP Architecture: Direct Bedrock Calls (Primary)
 
-The MVP uses **direct Bedrock API calls** within Lambda functions. This is simpler, faster to implement, and avoids the complexity of AgentCore configuration. AgentCore can be added post-MVP for more sophisticated reasoning.
+The MVP uses **direct Bedrock API calls** within Lambda functions. This
+is simpler, faster to implement, and avoids the complexity of AgentCore
+configuration. AgentCore can be added post-MVP for more sophisticated
+reasoning.
 
-### 4.1 AP Agent — Direct Orchestration (MVP Primary)
+### 4.1 AP Agent --- Direct Orchestration (MVP Primary)
 
-```python
+``` python
 # Simplified: Direct orchestration in Lambda (no AgentCore)
 def process_invoice_direct(document_id: str, extraction: dict) -> dict:
     """Process invoice using direct function calls instead of AgentCore."""
@@ -583,11 +620,13 @@ def process_invoice_direct(document_id: str, extraction: dict) -> dict:
     }
 ```
 
-**This is the MVP implementation.** The AgentCore approach (Sections 2-3 above) is retained as a post-MVP enhancement for when more sophisticated reasoning is needed.
+**This is the MVP implementation.** The AgentCore approach (Sections 2-3
+above) is retained as a post-MVP enhancement for when more sophisticated
+reasoning is needed.
 
-### 4.2 Records Agent — Direct KB Call (MVP Primary)
+### 4.2 Records Agent --- Direct KB Call (MVP Primary)
 
-```python
+``` python
 # Simplified: Direct Bedrock KB RetrieveAndGenerate (no AgentCore)
 def search_records_direct(question: str, session_id: str, category: str = None) -> dict:
     """Use Bedrock KB directly without AgentCore wrapper."""
@@ -612,78 +651,128 @@ def search_records_direct(question: str, session_id: str, category: str = None) 
     }
 ```
 
-**This is the MVP implementation.** Bedrock KB's `retrieve_and_generate` handles retrieval, generation, and session memory in a single API call — no custom agent loop needed.
+**This is the MVP implementation.** Bedrock KB's `retrieve_and_generate`
+handles retrieval, generation, and session memory in a single API call
+--- no custom agent loop needed.
 
----
+------------------------------------------------------------------------
 
 ## 5. Model Selection
 
 ### 5.1 Model Comparison
 
-| Model | Use Case | Latency | Cost/1K tokens | Quality |
-|-------|----------|---------|----------------|---------|
-| Claude 3 Haiku | Fast, simple tasks | ~1s | $0.00025 input | Good |
-| Claude 3 Sonnet | Complex reasoning | ~3s | $0.003 input | Excellent |
-| Claude 3.5 Sonnet | Best quality | ~3s | $0.003 input | Best |
+  Model               Use Case             Latency   Cost/1K tokens    Quality
+  ------------------- -------------------- --------- ----------------- -----------
+  Claude 3 Haiku      Fast, simple tasks   \~1s      \$0.00025 input   Good
+  Claude 3 Sonnet     Complex reasoning    \~3s      \$0.003 input     Excellent
+  Claude 3.5 Sonnet   Best quality         \~3s      \$0.003 input     Best
 
 ### 5.2 Model Assignment
 
-| Agent | Primary Model | Rationale |
-|-------|--------------|-----------|
-| AP Invoice Agent | Claude 3 Sonnet | Needs reasoning about matching rules and edge cases |
-| Records Agent | Claude 3 Sonnet | Needs synthesis quality for natural answers |
-| BDA Extraction | Bedrock Data Automation | Purpose-built for document extraction |
-| Embeddings | Titan Text Embeddings v2 | Cost-effective, good quality embeddings |
+  ------------------------------------------------------------------------
+  Agent           Primary Model                   Rationale
+  --------------- ------------------------------- ------------------------
+  AP Invoice      Claude 3 Sonnet                 Needs reasoning about
+  Agent                                           matching rules and edge
+                                                  cases
 
-**Cost Optimization (if budget is tight)**: Switch Records Agent to Claude 3 Haiku for faster, cheaper responses. Quality is slightly lower but acceptable for RAG (most intelligence comes from good retrieval).
+  Records Agent   Claude 3 Sonnet                 Needs synthesis quality
+                                                  for natural answers
 
----
+  BDA Extraction  Bedrock Data Automation         Purpose-built for
+                                                  document extraction
+
+  Embeddings      Titan Text Embeddings v2        Cost-effective, good
+                                                  quality embeddings
+  ------------------------------------------------------------------------
+
+**Cost Optimization (if budget is tight)**: Switch Records Agent to
+Claude 3 Haiku for faster, cheaper responses. Quality is slightly lower
+but acceptable for RAG (most intelligence comes from good retrieval).
+
+------------------------------------------------------------------------
 
 ## 6. Agent Testing Strategy
 
 ### 6.1 Test Scenarios for AP Agent
 
-| Scenario | Input | Expected Decision | Tests |
-|----------|-------|-------------------|-------|
-| Happy path | Valid invoice, PO match, GR confirmed, < $10K | APPROVED | Rule evaluation |
-| High amount | Valid match, $15,000 | ESCALATED to FINANCE_MANAGER | Amount threshold |
-| No PO match | Invoice with non-existent PO | ESCALATED to AP_CLERK | Match failure |
-| Low confidence | Overall confidence 0.72 | ESCALATED to AP_CLERK | Confidence check |
-| Unknown vendor | Vendor not in approved list | ESCALATED to AP_CLERK | Vendor check |
-| Partial GR | Received 8 of 10 items | ESCALATED to AP_CLERK | Quantity mismatch |
-| Amount variance | PO $500, Invoice $600 (20% off) | ESCALATED to AP_CLERK | Amount tolerance |
+  ----------------------------------------------------------------------------
+  Scenario         Input          Expected Decision               Tests
+  ---------------- -------------- ------------------------------- ------------
+  Happy path       Valid invoice, APPROVED                        Rule
+                   PO match, GR                                   evaluation
+                   confirmed, \<                                  
+                   \$10K                                          
+
+  High amount      Valid match,   ESCALATED to FINANCE_MANAGER    Amount
+                   \$15,000                                       threshold
+
+  No PO match      Invoice with   ESCALATED to AP_CLERK           Match
+                   non-existent                                   failure
+                   PO                                             
+
+  Low confidence   Overall        ESCALATED to AP_CLERK           Confidence
+                   confidence                                     check
+                   0.72                                           
+
+  Unknown vendor   Vendor not in  ESCALATED to AP_CLERK           Vendor check
+                   approved list                                  
+
+  Partial GR       Received 8 of  ESCALATED to AP_CLERK           Quantity
+                   10 items                                       mismatch
+
+  Amount variance  PO \$500,      ESCALATED to AP_CLERK           Amount
+                   Invoice \$600                                  tolerance
+                   (20% off)                                      
+  ----------------------------------------------------------------------------
 
 ### 6.2 Test Scenarios for Records Agent
 
-| Scenario | Query | Expected Behavior | Tests |
-|----------|-------|-------------------|-------|
-| Direct answer | "What is the travel policy limit?" | Clear answer + citation | RAG retrieval |
-| No information | "What is our Mars colonization budget?" | "I don't have information..." | Guardrail |
-| Off-topic | "What's the weather?" | Topic denial message | Guardrail |
-| Follow-up | "Tell me more about that" | Uses conversation context | Memory |
-| Category filter | "Search only contracts" | Filtered retrieval | Metadata filter |
-| Multiple sources | "Compare Policy A vs B" | Multi-citation answer | Citation quality |
+  ---------------------------------------------------------------------------
+  Scenario         Query          Expected Behavior               Tests
+  ---------------- -------------- ------------------------------- -----------
+  Direct answer    "What is the   Clear answer + citation         RAG
+                   travel policy                                  retrieval
+                   limit?"                                        
 
----
+  No information   "What is our   "I don't have information..."   Guardrail
+                   Mars                                           
+                   colonization                                   
+                   budget?"                                       
+
+  Off-topic        "What's the    Topic denial message            Guardrail
+                   weather?"                                      
+
+  Follow-up        "Tell me more  Uses conversation context       Memory
+                   about that"                                    
+
+  Category filter  "Search only   Filtered retrieval              Metadata
+                   contracts"                                     filter
+
+  Multiple sources "Compare       Multi-citation answer           Citation
+                   Policy A vs B"                                 quality
+  ---------------------------------------------------------------------------
+
+------------------------------------------------------------------------
 
 ## 7. Agent Monitoring
 
 ### 7.1 Metrics to Track
 
-| Metric | Agent | How Measured |
-|--------|-------|-------------|
-| Invocation count | Both | CloudWatch metric |
-| Latency (p50, p95) | Both | CloudWatch metric |
-| Error rate | Both | CloudWatch error count |
-| Token usage (input) | Both | Bedrock model invocation logs |
-| Token usage (output) | Both | Bedrock model invocation logs |
-| Approval rate | AP Agent | DynamoDB status counts |
-| Citation count | Records Agent | Average citations per response |
-| Guardrail triggers | Records Agent | Bedrock guardrail metrics |
+  Metric                 Agent           How Measured
+  ---------------------- --------------- --------------------------------
+  Invocation count       Both            CloudWatch metric
+  Latency (p50, p95)     Both            CloudWatch metric
+  Error rate             Both            CloudWatch error count
+  Token usage (input)    Both            Bedrock model invocation logs
+  Token usage (output)   Both            Bedrock model invocation logs
+  Approval rate          AP Agent        DynamoDB status counts
+  Citation count         Records Agent   Average citations per response
+  Guardrail triggers     Records Agent   Bedrock guardrail metrics
 
 ### 7.2 Logging
 
-```python
+``` python
 # Agent invocation logging
 log_event("agent_invocation", document_id,
     agent="ap-invoice-agent",
@@ -695,14 +784,26 @@ log_event("agent_invocation", document_id,
 )
 ```
 
----
+------------------------------------------------------------------------
 
 ## 8. Agent Evolution Roadmap
 
-| Phase | Capability | Timeline |
-|-------|-----------|----------|
-| MVP (Week 1-3) | Direct function calls for AP + Direct Bedrock KB RetrieveAndGenerate for RAG | Current |
-| V1.1 | Add AgentCore for AP reasoning on edge cases | Post-capstone |
-| V1.2 | Add memory/learning from past decisions | Future |
-| V2.0 | Multi-agent collaboration (AP asks Records) | Future |
-| V2.1 | Proactive anomaly detection agent | Future |
+  -----------------------------------------------------------------------
+  Phase             Capability                  Timeline
+  ----------------- --------------------------- -------------------------
+  MVP (Week 1-3)    Direct function calls for   Current
+                    AP + Direct Bedrock KB      
+                    RetrieveAndGenerate for RAG 
+
+  V1.1              Add AgentCore for AP        Post-capstone
+                    reasoning on edge cases     
+
+  V1.2              Add memory/learning from    Future
+                    past decisions              
+
+  V2.0              Multi-agent collaboration   Future
+                    (AP asks Records)           
+
+  V2.1              Proactive anomaly detection Future
+                    agent                       
+  -----------------------------------------------------------------------

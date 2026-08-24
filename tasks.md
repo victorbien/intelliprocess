@@ -63,12 +63,12 @@ Acceptance Criteria: AC-3.9.x, AC-5.1.x, AC-5.2.x
 
 | # | Task | Status |
 |---|------|--------|
-| 4.1 | Dashboard stats aggregation — GET /dashboard/stats | [ ] |
-| 4.2 | Seed data endpoint — POST /admin/seed-data | [ ] |
-| 4.3 | KB sync trigger — POST /documents/sync | [ ] |
-| 4.4 | Purchase Order upload — POST /purchase-orders/upload (Admin uploads PO document → stored in DynamoDB for matching) | [ ] |
-| 4.5 | Goods Receipt upload — POST /goods-receipts/upload (Admin uploads GR document → stored in DynamoDB for three-way match) | [ ] |
-| 4.6 | Unit tests — dashboard handler | [ ] |
+| 4.1 | Dashboard stats aggregation — GET /dashboard/stats | [x] |
+| 4.2 | Seed data endpoint — POST /admin/seed-data | [x] |
+| 4.3 | KB sync trigger — POST /documents/sync | [x] |
+| 4.4 | Purchase Order upload — POST /purchase-orders/upload (Admin uploads PO document → stored in DynamoDB for matching) | [x] |
+| 4.5 | Goods Receipt upload — POST /goods-receipts/upload (Admin uploads GR document → stored in DynamoDB for three-way match) | [x] |
+| 4.6 | Unit tests — dashboard handler | [x] |
 
 ---
 

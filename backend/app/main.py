@@ -52,6 +52,13 @@ app.include_router(invoices.router, prefix="/invoices", tags=["invoices"])
 app.include_router(documents.router, prefix="/documents", tags=["documents"])
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
 app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
+app.include_router(dashboard.admin_router, prefix="/admin", tags=["admin"])
+app.include_router(
+    dashboard.po_router, prefix="/purchase-orders", tags=["purchase-orders"]
+)
+app.include_router(
+    dashboard.gr_router, prefix="/goods-receipts", tags=["goods-receipts"]
+)
 
 
 @app.get("/health", tags=["system"])

@@ -190,6 +190,44 @@ class DynamoClient:
             )
             raise
 
+    def scan_all(
+        self, projection: str | None = None, attr_names: dict[str, str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Scan the entire table and return all items, following pagination.
+
+        Note: Scan is acceptable here because invoice volume is low in MVP (<100 items).
+        For production, replace with a query against a purpose-built index or a
+        materialised counter table.
+
+        Args:
+            projection: Optional ProjectionExpression to limit returned attributes.
+            attr_names: Optional ExpressionAttributeNames map for reserved words.
+
+        Returns:
+            List of all items in the table.
+        """
+        items: list[dict[str, Any]] = []
+        scan_kwargs: dict[str, Any] = {}
+        if projection:
+            scan_kwargs["ProjectionExpression"] = projection
+        if attr_names:
+            scan_kwargs["ExpressionAttributeNames"] = attr_names
+
+        try:
+            response = self._get_table().scan(**scan_kwargs)
+            items.extend(response.get("Items", []))
+            while "LastEvaluatedKey" in response:
+                scan_kwargs["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+                response = self._get_table().scan(**scan_kwargs)
+                items.extend(response.get("Items", []))
+            return items
+        except ClientError as e:
+            logger.error(
+                "DynamoDB scan_all failed",
+                extra={"table": self._table_name, "error": str(e)},
+            )
+            raise
+
     def scan_count_by_status(self) -> dict[str, int]:
         """Scan table and count items grouped by status. Used for dashboard stats.
 

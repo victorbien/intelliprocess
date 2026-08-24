@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     # Amazon Bedrock
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-sonnet-20240229-v1:0"
     KNOWLEDGE_BASE_ID: str = ""
+    KB_DATA_SOURCE_ID: str = ""
     GUARDRAIL_ID: str = ""
 
     # Bedrock Data Automation

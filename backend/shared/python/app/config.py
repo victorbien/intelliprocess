@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     AWS_REGION: str = "us-east-1"
 
     # S3
-    DOCUMENT_BUCKET: str = "intelliprocess-ai-documents"
+    DOCUMENT_BUCKET: str = ""
 
     # DynamoDB Tables
     INVOICE_TABLE: str = ""

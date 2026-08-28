@@ -67,7 +67,7 @@ async def upload_invoice(
     Upon successful S3 upload, an S3 event triggers the InvoiceProcessor Lambda.
     """
     document_id = str(uuid.uuid4())
-    s3_key = f"{DocumentType.INVOICE}/{document_id}/{body.file_name}"
+    s3_key = f"{DocumentType.INVOICE}/incoming/{body.file_name}"
 
     logger.info(
         "Invoice upload initiated",

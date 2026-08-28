@@ -57,7 +57,7 @@ async def upload_document(
     After upload, a KB sync must be triggered for the document to become searchable.
     """
     document_id = str(uuid.uuid4())
-    s3_key = f"{DocumentType.RECORD}/{document_id}/{body.file_name}"
+    s3_key = f"{DocumentType.RECORD}/knowledge-base/{body.file_name}"
 
     logger.info(
         "Document upload initiated",

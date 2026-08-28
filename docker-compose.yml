@@ -8,9 +8,9 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - AWS_REGION=us-east-1
+      - AWS_REGION=ap-southeast-2
       - STAGE=dev
-      - DOCUMENT_BUCKET=intelliprocess-docs-dev-local
+      - DOCUMENT_BUCKET=intelliprocess-ai-documents
       - INVOICE_TABLE=IntelliProcess-Invoices-dev
       - PO_TABLE=IntelliProcess-PurchaseOrders-dev
       - GR_TABLE=IntelliProcess-GoodsReceipts-dev

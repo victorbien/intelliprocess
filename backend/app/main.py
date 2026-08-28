@@ -10,10 +10,11 @@ from mangum import Mangum
 from app.config import settings
 
 # ── Local dev: activate moto mocks before any boto3 client is created ─────────
+# Before (bug — reads a raw OS environment variable, not the app's config)
 _USE_MOCKS = settings.STAGE == "dev" and os.environ.get("USE_MOCKS", "true").lower() == "true"
-if _USE_MOCKS:
-    from app.dev_mock import start as _start_mocks
-    _start_mocks()
+
+# After (fix — reads the value pydantic already loaded from .env)
+_USE_MOCKS = settings.STAGE == "dev" and settings.USE_MOCKS
 # ──────────────────────────────────────────────────────────────────────────────
 
 from app.middleware import CorrelationIdMiddleware, register_exception_handlers

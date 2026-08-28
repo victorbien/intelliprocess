@@ -127,7 +127,7 @@ Resources:
     Type: AWS::S3::Bucket
     DependsOn: DocumentBucketPermissionToProcessor
     Properties:
-      BucketName: !Sub "intelliprocess-documents-${Stage}-${AWS::AccountId}"
+      BucketName: !Sub "intelliprocess-ai-documents"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -147,7 +147,7 @@ Resources:
               - POST
               - HEAD
             AllowedOrigins:
-              - "http://localhost:5173"
+              - "http://localhost:*"
               - "https://*.cloudfront.net"
             ExposeHeaders:
               - "ETag"
@@ -175,8 +175,8 @@ Resources:
             Principal: "*"
             Action: "s3:*"
             Resource:
-              - !Sub "arn:aws:s3:::${DocumentBucket}"
-              - !Sub "arn:aws:s3:::${DocumentBucket}/*"
+              - !Sub "arn:aws:s3:::intelliprocess-ai-documents"
+              - !Sub "aarn:aws:s3:::intelliprocess-ai-documents/*"
             Condition:
               Bool:
                 "aws:SecureTransport": "false"

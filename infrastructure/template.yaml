@@ -25,6 +25,11 @@ Parameters:
     Description: Bedrock Guardrails ID
     Default: "PLACEHOLDER"
 
+  DocumentBucketName:
+    Type: String
+    Description: Existing S3 bucket used for invoices and organizational documents
+    Default: intelliprocess-ai-documents
+
 Globals:
   Function:
     Runtime: python3.12
@@ -34,7 +39,7 @@ Globals:
     Environment:
       Variables:
         STAGE: !Ref Stage
-        DOCUMENT_BUCKET: !Ref DocumentsBucket
+        DOCUMENT_BUCKET: !Ref DocumentBucketName
         INVOICE_TABLE: !Ref InvoicesTable
         PO_TABLE: !Ref PurchaseOrdersTable
         GR_TABLE: !Ref GoodsReceiptsTable
@@ -47,30 +52,6 @@ Globals:
         LOG_LEVEL: "INFO"
 
 Resources:
-  # ======================== S3 ========================
-  DocumentsBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
-    Properties:
-      BucketName: !Sub "intelliprocess-docs-${Stage}-${AWS::AccountId}"
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      CorsConfiguration:
-        CorsRules:
-          - AllowedHeaders: ["*"]
-            AllowedMethods: [PUT, POST, GET]
-            AllowedOrigins:
-              - "http://localhost:5173"
-              - "http://localhost:3000"
-            MaxAge: 3600
-
   # ======================== DynamoDB ========================
   InvoicesTable:
     Type: AWS::DynamoDB::Table
@@ -236,7 +217,7 @@ Resources:
       Timeout: 60
       MemorySize: 512
       Policies:
-        - S3CrudPolicy: { BucketName: !Ref DocumentsBucket }
+        - S3CrudPolicy: { BucketName: !Ref DocumentBucketName }
         - DynamoDBCrudPolicy: { TableName: !Ref InvoicesTable }
         - DynamoDBCrudPolicy: { TableName: !Ref PurchaseOrdersTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GoodsReceiptsTable }
@@ -271,7 +252,7 @@ Resources:
       Timeout: 300
       MemorySize: 512
       Policies:
-        - S3ReadPolicy: { BucketName: !Ref DocumentsBucket }
+        - S3ReadPolicy: { BucketName: !Ref DocumentBucketName }
         - DynamoDBCrudPolicy: { TableName: !Ref InvoicesTable }
         - DynamoDBReadPolicy: { TableName: !Ref PurchaseOrdersTable }
         - DynamoDBReadPolicy: { TableName: !Ref GoodsReceiptsTable }
@@ -282,16 +263,15 @@ Resources:
                 - bedrock:InvokeDataAutomationAsync
                 - bedrock:GetDataAutomationStatus
               Resource: "*"
-      Events:
-        S3InvoiceUpload:
-          Type: S3
-          Properties:
-            Bucket: !Ref DocumentsBucket
-            Events: s3:ObjectCreated:*
-            Filter:
-              S3Key:
-                Rules:
-                  - { Name: prefix, Value: "invoices/" }
+
+  InvoiceProcessorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt InvoiceProcessorFunction.Arn
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:aws:s3:::${DocumentBucketName}"
 
   # ======================== API Gateway ========================
   ApiGateway:
@@ -316,7 +296,7 @@ Outputs:
 
   BucketName:
     Description: S3 document bucket name
-    Value: !Ref DocumentsBucket
+    Value: !Ref DocumentBucketName
 
   UserPoolId:
     Description: Cognito User Pool ID

@@ -1,38 +1,50 @@
 /**
- * Route guard - redirects to /login if unauthenticated.
- * Optionally checks required role.
+ * Route guard (AC-1.1.x, AC-1.2.x).
+ *
+ * - Unauthenticated users are redirected to /login.
+ * - When `roles` is provided, users lacking those roles are shown a 403 notice
+ *   rather than the protected content.
  */
 
-import { Navigate, Outlet, useLocation } from "react-router-dom";
-import { useAuth, type UserRole } from "../../context/AuthContext";
+import { Navigate, useLocation } from "react-router-dom";
+import type { ReactNode } from "react";
+
+import { useAuth } from "@/context/useAuth";
+import type { UserRole } from "@/services/types";
+import Spinner from "./Spinner";
 
 interface ProtectedRouteProps {
-  /** When provided, the user must hold one of these roles to view the route. */
-  allowedRoles?: UserRole[];
+  children: ReactNode;
+  roles?: UserRole[];
 }
 
-export default function ProtectedRoute({ allowedRoles }: ProtectedRouteProps) {
-  const { isAuthenticated, loading, user } = useAuth();
+export default function ProtectedRoute({ children, roles }: ProtectedRouteProps) {
+  const { isAuthenticated, loading, hasRole } = useAuth();
   const location = useLocation();
 
-  // Wait for the persisted session to be restored before deciding.
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center text-sm text-gray-400">
-        Loading…
+      <div className="flex min-h-[50vh] items-center justify-center">
+        <Spinner label="Checking your session" />
       </div>
     );
   }
 
   if (!isAuthenticated) {
-    // Remember where the user was headed so login can send them back.
-    return <Navigate to="/login" replace state={{ from: location }} />;
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }
 
-  if (allowedRoles && user && !allowedRoles.includes(user.role)) {
-    // Authenticated but lacking the required role.
-    return <Navigate to="/invoices" replace />;
+  if (roles && roles.length > 0 && !hasRole(...roles)) {
+    return (
+      <div className="mx-auto mt-16 max-w-md rounded-lg border border-amber-200 bg-amber-50 p-6 text-center">
+        <h2 className="text-lg font-semibold text-amber-800">Access restricted</h2>
+        <p className="mt-2 text-sm text-amber-700">
+          You do not have permission to view this page. If you believe this is a
+          mistake, contact your administrator.
+        </p>
+      </div>
+    );
   }
 
-  return <Outlet />;
+  return <>{children}</>;
 }

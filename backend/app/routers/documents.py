@@ -25,10 +25,13 @@ from app.models.schemas import (
     DocumentListItem,
     DocumentUploadRequest,
     DocumentUploadResponse,
+    KbSyncResponse,
     PaginatedResponse,
     PresignedPostData,
 )
+from app.middleware import AppError
 from app.services.dynamo import DynamoClient
+from app.services.knowledge_base import KnowledgeBaseSyncError, start_sync
 from app.services.s3 import S3Client
 
 logger = logging.getLogger(__name__)
@@ -54,7 +57,7 @@ async def upload_document(
     After upload, a KB sync must be triggered for the document to become searchable.
     """
     document_id = str(uuid.uuid4())
-    s3_key = f"{DocumentType.RECORD}/{document_id}/{body.file_name}"
+    s3_key = f"{DocumentType.RECORD}/knowledge-base/{body.file_name}"
 
     logger.info(
         "Document upload initiated",
@@ -161,4 +164,31 @@ async def list_documents(
             count=len(document_items),
             next_key=None,
         )
+    )
+
+
+@router.post(
+    "/sync",
+    response_model=ApiResponse[KbSyncResponse],
+    status_code=202,
+)
+async def sync_knowledge_base(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+):
+    """Trigger a Knowledge Base sync to ingest new documents (FR-CROSS-001).
+
+    Admin-only. Returns HTTP 202 (Accepted) — ingestion runs asynchronously.
+    In local development the sync is simulated and a pseudo job id is returned.
+    """
+    logger.info("Knowledge base sync requested", extra={"userId": user.user_id})
+
+    try:
+        message, sync_job_id = start_sync()
+    except KnowledgeBaseSyncError as exc:
+        logger.error("Knowledge base sync failed", extra={"error": str(exc)})
+        raise AppError(str(exc), status_code=503)
+
+    return ApiResponse(
+        status_code=202,
+        data=KbSyncResponse(message=message, syncJobId=sync_job_id),
     )

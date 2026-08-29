@@ -9,13 +9,13 @@ from mangum import Mangum
 
 from app.config import settings
 
-# ── Local dev: activate moto mocks before any boto3 client is created ─────────
-# _USE_MOCKS = settings.STAGE == "dev" and os.environ.get("USE_MOCKS", "true").lower() == "true" --modify by Danae
+# -- Local dev: activate moto mocks before any boto3 client is created ---------
+# Read the value pydantic already loaded from .env (not a raw OS env var).
 _USE_MOCKS = settings.STAGE == "dev" and settings.USE_MOCKS
 if _USE_MOCKS:
     from app.dev_mock import start as _start_mocks
     _start_mocks()
-# ──────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
 
 from app.middleware import CorrelationIdMiddleware, register_exception_handlers
 from app.routers import chat, dashboard, documents, invoices
@@ -34,7 +34,7 @@ app = FastAPI(
     redoc_url=None,
 )
 
-# Middleware (order matters — outermost first)
+# Middleware (order matters -- outermost first)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:3000"],
@@ -56,11 +56,18 @@ app.include_router(invoices.router, prefix="/invoices", tags=["invoices"])
 app.include_router(documents.router, prefix="/documents", tags=["documents"])
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
 app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
+app.include_router(dashboard.admin_router, prefix="/admin", tags=["admin"])
+app.include_router(
+    dashboard.po_router, prefix="/purchase-orders", tags=["purchase-orders"]
+)
+app.include_router(
+    dashboard.gr_router, prefix="/goods-receipts", tags=["goods-receipts"]
+)
 
 
 @app.get("/health", tags=["system"])
 def health_check():
-    """Health check endpoint — unauthenticated."""
+    """Health check endpoint -- unauthenticated."""
     return {"status": "healthy", "stage": settings.STAGE}
 
 

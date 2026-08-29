@@ -49,7 +49,7 @@ class S3Client:
         """Generate a presigned POST URL for direct browser upload to S3.
 
         Args:
-            key: S3 object key (e.g., "invoices/{id}/filename.pdf").
+            key: S3 object key (e.g., "invoices/incoming/filename.pdf").
             content_type: Expected Content-Type of the upload.
             max_size: Maximum allowed file size in bytes.
             expires_in: URL expiration in seconds.

@@ -20,8 +20,26 @@ from moto import mock_aws   # noqa: E402  — import after env vars set
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+def _drop_table_if_exists(dynamodb, table_name: str) -> None:
+    """Delete a table if it already exists in the mocked backend.
+
+    The application's dev_mock (activated when STAGE=dev via conftest importing
+    app.main) starts a process-wide moto mock that pre-creates the ``test-*``
+    tables. Because moto shares one backend per process, this fixture's nested
+    ``mock_aws()`` sees those tables and ``create_table`` would raise
+    ResourceInUseException. Dropping first makes table creation idempotent and
+    guarantees each test starts from clean, freshly-seeded tables.
+    """
+    try:
+        dynamodb.Table(table_name).delete()
+    except Exception:
+        # Table does not exist (or backend not initialised) — nothing to drop.
+        pass
+
+
 def _create_po_table(dynamodb, table_name: str):
     """Create a minimal PO table with GSI-VendorDate."""
+    _drop_table_if_exists(dynamodb, table_name)
     return dynamodb.create_table(
         TableName=table_name,
         BillingMode="PAY_PER_REQUEST",
@@ -46,6 +64,7 @@ def _create_po_table(dynamodb, table_name: str):
 
 def _create_gr_table(dynamodb, table_name: str):
     """Create a minimal GR table with GSI-PONumber."""
+    _drop_table_if_exists(dynamodb, table_name)
     return dynamodb.create_table(
         TableName=table_name,
         BillingMode="PAY_PER_REQUEST",

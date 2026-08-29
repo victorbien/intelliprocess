@@ -1,0 +1,673 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS SAM Template for IntelliProcess AI Platform - Capstone Group 6 MVP Stack
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Deployment stage/environment name
+  KnowledgeBaseId:
+    Type: String
+    Default: NOT_SET
+    Description: Amazon Bedrock Knowledge Base ID (Set after manual console/CLI creation)
+  BDAProjectArn:
+    Type: String
+    Default: NOT_SET
+    Description: Bedrock Data Automation Project ARN (Set after manual console/CLI creation)
+  GuardrailId:
+    Type: String
+    Default: NOT_SET
+    Description: Amazon Bedrock Guardrail ID (Set after manual console/CLI creation)
+  GuardrailVersion:
+    Type: String
+    Default: DRAFT
+    Description: Bedrock Guardrail Version to invoke
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    LoggingConfig:
+      LogFormat: JSON
+      ApplicationLogLevel: INFO
+      SystemLogLevel: WARN
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+        DOCUMENT_BUCKET: !Ref DocumentBucket
+        INVOICE_TABLE: !Ref InvoicesTable
+        PO_TABLE: !Ref PurchaseOrdersTable
+        GR_TABLE: !Ref GoodsReceiptsTable
+        CONVERSATION_TABLE: !Ref ConversationsTable
+        DOCUMENT_TABLE: !Ref DocumentsTable
+        KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+        BDA_PROJECT_ARN: !Ref BDAProjectArn
+        GUARDRAIL_ID: !Ref GuardrailId
+        GUARDRAIL_VERSION: !Ref GuardrailVersion
+        BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+        LOG_LEVEL: INFO
+
+Resources:
+  # =========================================================================
+  # 1. COGNITO IDENTITY & ACCESS MANAGEMENT
+  # =========================================================================
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "IntelliProcess-Users-${Stage}"
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      MfaConfiguration: 'OFF'
+      PasswordPolicy:
+        MinimumLength: 8
+        RequireUppercase: true
+        RequireLowercase: true
+        RequireNumbers: true
+        RequireSymbols: false
+      Schema:
+        - Name: name
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: department
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: intelliprocess-web
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+
+  UserPoolGroupAPClerk:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: AP_CLERK
+      Description: AP Clerk Group for Ingestion, Verification, and Status Tracking
+      UserPoolId: !Ref CognitoUserPool
+
+  UserPoolGroupFinanceManager:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: FINANCE_MANAGER
+      Description: Finance Manager Group for Approval and Dashboard Analytics
+      UserPoolId: !Ref CognitoUserPool
+
+  UserPoolGroupStaff:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: STAFF
+      Description: Staff Group for Records Assistant Access
+      UserPoolId: !Ref CognitoUserPool
+
+  UserPoolGroupAdmin:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: ADMIN
+      Description: System Administrator Group
+      UserPoolId: !Ref CognitoUserPool
+
+  # =========================================================================
+  # 2. STORAGE (S3 BUCKET & CORS)
+  # =========================================================================
+  DocumentBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: DocumentBucketPermissionToProcessor
+    Properties:
+      BucketName: !Sub "intelliprocess-ai-documents"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES-256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - HEAD
+            AllowedOrigins:
+              - "http://localhost:*"
+              - "https://*.cloudfront.net"
+            ExposeHeaders:
+              - "ETag"
+            MaxAge: 3600
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: invoices/
+            Function: !GetAtt InvoiceProcessorFunction.Arn
+
+  # S3 Bucket Policy to block non-HTTPS traffic and restrict access
+  DocumentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocumentBucket
+      BucketPolicyStatement:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnforceSSLOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::intelliprocess-ai-documents"
+              - !Sub "aarn:aws:s3:::intelliprocess-ai-documents/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+  # =========================================================================
+  # 3. DATABASE (DYNAMODB TABLES)
+  # =========================================================================
+  InvoicesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "IntelliProcess-Invoices-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: documentId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: uploadedBy
+          AttributeType: S
+        - AttributeName: uploadedAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: documentId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-StatusDate
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: uploadedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI-UserDate
+          KeySchema:
+            - AttributeName: uploadedBy
+              KeyType: HASH
+            - AttributeName: uploadedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  PurchaseOrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "IntelliProcess-PurchaseOrders-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: poNumber
+          AttributeType: S
+        - AttributeName: vendorName
+          AttributeType: S
+        - AttributeName: createdDate
+          AttributeType: S
+      KeySchema:
+        - AttributeName: poNumber
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-VendorDate
+          KeySchema:
+            - AttributeName: vendorName
+              KeyType: HASH
+            - AttributeName: createdDate
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  GoodsReceiptsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "IntelliProcess-GoodsReceipts-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: grId
+          AttributeType: S
+        - AttributeName: poNumber
+          AttributeType: S
+        - AttributeName: receivedDate
+          AttributeType: S
+      KeySchema:
+        - AttributeName: grId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-PONumber
+          KeySchema:
+            - AttributeName: poNumber
+              KeyType: HASH
+            - AttributeName: receivedDate
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ConversationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "IntelliProcess-Conversations-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-UserSessions
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "IntelliProcess-Documents-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+        - AttributeName: documentId
+          AttributeType: S
+        - AttributeName: category
+          AttributeType: S
+        - AttributeName: uploadedAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: documentId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: GSI-CategoryDate
+          KeySchema:
+            - AttributeName: category
+              KeyType: HASH
+            - AttributeName: uploadedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # =========================================================================
+  # 4. SHARED CODE LAYER
+  # =========================================================================
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "intelliprocess-shared-${Stage}"
+      Description: Shared Python modules (DynamoDB wrapper, S3 client, response utility, logger)
+      ContentUri: shared/
+      CompatibleRuntimes:
+        - python3.12
+    Metadata:
+      BuildMethod: python3.12
+
+  # =========================================================================
+  # 5. API GATEWAY (REST API) WITH COGNITO AUTHORIZATION
+  # =========================================================================
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "IntelliProcess-API-${Stage}"
+      StageName: !Ref Stage
+      EndpointConfiguration: Regional
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Correlation-Id'"
+        AllowOrigin: "'*'" # Set to frontend origin post-MVP
+        MaxAge: "'86400'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+            IdentitySource: 'method.request.header.Authorization'
+      MethodSettings:
+        - LoggingLevel: INFO
+          MetricsEnabled: true
+          ResourcePath: '/*'
+          HttpMethod: '*'
+          # Configure global API Throttling (FR-CROSS-003: 100 requests/minute per user)
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 1.67
+
+  # =========================================================================
+  # 6. LAMBDA COMPUTE FUNCTIONS (LEASE PRIVILEGE SECURITY)
+  # =========================================================================
+
+  # Function 1: UploadHandler
+  UploadHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "intelliprocess-upload-${Stage}"
+      CodeUri: functions/upload_handler/
+      Handler: app.lambda_handler
+      MemorySize: 256
+      Timeout: 30
+      Layers:
+        - !Ref SharedLayer
+      Events:
+        InvoiceUploadApi:
+          Type: Api
+          Properties:
+            Path: /invoices/upload
+            Method: post
+            RestApiId: !Ref ApiGateway
+        DocUploadApi:
+          Type: Api
+          Properties:
+            Path: /documents/upload
+            Method: post
+            RestApiId: !Ref ApiGateway
+      Policies:
+        - Statement:
+            - Sid: S3UploadPermissions
+              Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+              Resource:
+                - !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Sid: DynamoDBPutPermissions
+              Effect: Allow
+              Action:
+                - dynamoDB:PutItem
+              Resource:
+                - !GetAtt InvoicesTable.Arn
+                - !GetAtt DocumentsTable.Arn
+
+  # Function 2: InvoiceProcessor
+  InvoiceProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "intelliprocess-processor-${Stage}"
+      CodeUri: functions/invoice_processor/
+      Handler: app.lambda_handler
+      MemorySize: 512
+      Timeout: 300
+      Layers:
+        - !Ref SharedLayer
+      Policies:
+        - Statement:
+            - Sid: S3ReadWriteProcessor
+              Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource:
+                - !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Sid: DynamoDBCRUDProcessor
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamoDB:PutItem
+                - dynamoDB:UpdateItem
+                - dynamoDB:DeleteItem
+              Resource:
+                - !GetAtt InvoicesTable.Arn
+            - Sid: DynamoDBReadReferenceData
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+              Resource:
+                - !GetAtt PurchaseOrdersTable.Arn
+                - !Sub "${PurchaseOrdersTable.Arn}/index/*"
+                - !GetAtt GoodsReceiptsTable.Arn
+                - !Sub "${GoodsReceiptsTable.Arn}/index/*"
+            - Sid: BedrockInvokeProcessor
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0"
+                - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+            - Sid: BDAInvokePermissions
+              Effect: Allow
+              Action:
+                - bedrock:InvokeDataAutomationAsync
+                - bedrock:GetDataAutomationStatus
+              Resource:
+                - "*" # BDA permissions scoped to account resources, '*' required for async APIs
+
+  # Permission allowing S3 Bucket to trigger InvoiceProcessor Lambda
+  DocumentBucketPermissionToProcessor:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt InvoiceProcessorFunction.Arn
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::intelliprocess-documents-${Stage}-${AWS::AccountId}"
+      SourceAccount: !Ref "AWS::AccountId"
+
+  # Function 3: ChatHandler
+  ChatHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "intelliprocess-chat-${Stage}"
+      CodeUri: functions/chat_handler/
+      Handler: app.lambda_handler
+      MemorySize: 256
+      Timeout: 60
+      Layers:
+        - !Ref SharedLayer
+      Events:
+        ChatApi:
+          Type: Api
+          Properties:
+            Path: /chat
+            Method: post
+            RestApiId: !Ref ApiGateway
+        ChatSessionsApi:
+          Type: Api
+          Properties:
+            Path: /chat/sessions
+            Method: get
+            RestApiId: !Ref ApiGateway
+        ChatSessionHistoryApi:
+          Type: Api
+          Properties:
+            Path: /chat/sessions/{sessionId}
+            Method: get
+            RestApiId: !Ref ApiGateway
+      Policies:
+        - Statement:
+            - Sid: DynamoDBCRUDConversations
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamoDB:PutItem
+                - dynamoDB:UpdateItem
+                - dynamoDB:DeleteItem
+                - dynamoDB:Query
+              Resource:
+                - !GetAtt ConversationsTable.Arn
+                - !Sub "${ConversationsTable.Arn}/index/*"
+            - Sid: BedrockRAGPermissions
+              Effect: Allow
+              Action:
+                - bedrock:Retrieve
+                - bedrock:RetrieveAndGenerate
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:aws:bedrock:us-east-1:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+                - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0"
+                - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+                - "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0"
+
+  # Function 4: DashboardHandler
+  DashboardHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "intelliprocess-dashboard-${Stage}"
+      CodeUri: functions/dashboard_handler/
+      Handler: app.lambda_handler
+      MemorySize: 128
+      Timeout: 10
+      Layers:
+        - !Ref SharedLayer
+      Events:
+        ListInvoicesApi:
+          Type: Api
+          Properties:
+            Path: /invoices
+            Method: get
+            RestApiId: !Ref ApiGateway
+        GetInvoiceApi:
+          Type: Api
+          Properties:
+            Path: /invoices/{documentId}
+            Method: get
+            RestApiId: !Ref ApiGateway
+        ApproveInvoiceApi:
+          Type: Api
+          Properties:
+            Path: /invoices/{documentId}/approve
+            Method: post
+            RestApiId: !Ref ApiGateway
+        ListDocsApi:
+          Type: Api
+          Properties:
+            Path: /documents
+            Method: get
+            RestApiId: !Ref ApiGateway
+        SyncKBApi:
+          Type: Api
+          Properties:
+            Path: /documents/sync
+            Method: post
+            RestApiId: !Ref ApiGateway
+        StatsApi:
+          Type: Api
+          Properties:
+            Path: /dashboard/stats
+            Method: get
+            RestApiId: !Ref ApiGateway
+        SeedDataApi:
+          Type: Api
+          Properties:
+            Path: /admin/seed-data
+            Method: post
+            RestApiId: !Ref ApiGateway
+        UploadPurchaseOrderApi:
+          Type: Api
+          Properties:
+            Path: /purchase-orders/upload
+            Method: post
+            RestApiId: !Ref ApiGateway
+        UploadGoodsReceiptApi:
+          Type: Api
+          Properties:
+            Path: /goods-receipts/upload
+            Method: post
+            RestApiId: !Ref ApiGateway
+      Policies:
+        - Statement:
+            - Sid: S3ReadDashboard
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - !Sub "arn:aws:s3:::${DocumentBucket}/*"
+            - Sid: DynamoDBReadWriteAllTables
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:BatchWriteItem
+              Resource:
+                - !GetAtt InvoicesTable.Arn
+                - !Sub "${InvoicesTable.Arn}/index/*"
+                - !GetAtt PurchaseOrdersTable.Arn
+                - !Sub "${PurchaseOrdersTable.Arn}/index/*"
+                - !GetAtt GoodsReceiptsTable.Arn
+                - !Sub "${GoodsReceiptsTable.Arn}/index/*"
+                - !GetAtt DocumentsTable.Arn
+                - !Sub "${DocumentsTable.Arn}/index/*"
+            - Sid: BedrockKBSyncPermissions
+              Effect: Allow
+              Action:
+                - bedrock:StartIngestionJob
+              Resource:
+                - !Sub "arn:aws:bedrock:us-east-1:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+
+Outputs:
+  Region:
+    Description: AWS region
+    Value: !Ref "AWS::Region"
+  ApiUrl:
+    Description: Base URL of the API Gateway REST API endpoints
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+  DocumentBucketName:
+    Description: Amazon S3 Bucket Name for Document Storage
+    Value: !Ref DocumentBucket
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+  UserPoolClientId:
+    Description: Cognito User Pool App Client ID
+    Value: !Ref UserPoolClient
+  InvoicesTableName:
+    Description: Invoices metadata table name
+    Value: !Ref InvoicesTable
+  PurchaseOrdersTableName:
+    Description: Purchase Orders reference table name
+    Value: !Ref PurchaseOrdersTable
+  GoodsReceiptsTableName:
+    Description: Goods Receipts reference table name
+    Value: !Ref GoodsReceiptsTable
+  ConversationsTableName:
+    Description: Conversations table name
+    Value: !Ref ConversationsTable
+  DocumentsTableName:
+    Description: Documents table name
+    Value: !Ref DocumentsTable

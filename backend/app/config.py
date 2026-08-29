@@ -1,4 +1,4 @@
-﻿"""Application configuration loaded from environment variables."""
+"""Application configuration loaded from environment variables."""
 
 from pathlib import Path
 
@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     AWS_REGION: str = "ap-southeast-2"
 
     # S3
-    DOCUMENT_BUCKET: str = ""
+    DOCUMENT_BUCKET: str = "intelliprocess-ai-documents"
     S3_VECTORS_INDEX: str = ""
 
     # Strands Agent
@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # Amazon Bedrock
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-sonnet-20240229-v1:0"
     KNOWLEDGE_BASE_ID: str = ""
+    KB_DATA_SOURCE_ID: str = ""
     GUARDRAIL_ID: str = ""
 
     # Bedrock Data Automation

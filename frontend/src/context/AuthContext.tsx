@@ -1,114 +1,85 @@
 /**
- * Authentication context provider.
- *
- * Provides:
- * - user (current user info + role)
- * - isAuthenticated
- * - login / logout actions
- * - loading state
- *
- * Dev mode: authentication is handled locally. The login form lets a developer
- * pick a role and sign in without Cognito; the selected identity is persisted
- * to localStorage so a page refresh keeps the session. The backend already
- * accepts a default dev user when STAGE=dev, so no token is required for API
- * calls in this mode.
- *
- * Production: this is the single integration point for Amazon Cognito. Replace
- * `login` with a Cognito sign-in call and store the returned token, then send
- * it as an Authorization header from the API layer. The rest of the app depends
- * only on the shape exposed here, so swapping the backend does not require UI
- * changes.
+ * Authentication context — holds the current user, exposes sign-in/out, and
+ * provides role-check helpers used for route/nav gating (AC-1.2.x).
  */
 
 import {
   createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from "react";
 
-export type UserRole = "AP_CLERK" | "FINANCE_MANAGER" | "STAFF" | "ADMIN";
+import * as auth from "@/services/auth";
+import type { AuthUser } from "@/services/auth";
+import { logger } from "@/services/logger";
+import type { UserRole } from "@/services/types";
 
-export interface AuthUser {
-  userId: string;
-  email: string;
-  role: UserRole;
-}
-
-interface AuthContextValue {
+export interface AuthContextValue {
   user: AuthUser | null;
-  isAuthenticated: boolean;
   loading: boolean;
-  login: (email: string, role: UserRole) => void;
-  logout: () => void;
+  isAuthenticated: boolean;
+  cognitoConfigured: boolean;
+  signIn: (username: string, password: string) => Promise<void>;
+  signOut: () => Promise<void>;
+  /** True if the user holds any of the given roles. */
+  hasRole: (...roles: UserRole[]) => boolean;
 }
 
-const STORAGE_KEY = "intelliprocess.auth.user";
-
-const AuthContext = createContext<AuthContextValue | undefined>(undefined);
-
-function readStoredUser(): AuthUser | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as AuthUser;
-    if (parsed && parsed.userId && parsed.email && parsed.role) {
-      return parsed;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
+// eslint-disable-next-line react-refresh/only-export-components
+export const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Restore any persisted session on first mount.
+  // Restore any existing session on mount.
   useEffect(() => {
-    setUser(readStoredUser());
-    setLoading(false);
-  }, []);
-
-  const login = useCallback((email: string, role: UserRole) => {
-    const nextUser: AuthUser = {
-      // Keep the dev backend's default user id so persisted records line up
-      // with what the API attributes to the dev user.
-      userId: "dev-user-001",
-      email,
-      role,
+    let active = true;
+    (async () => {
+      try {
+        const current = await auth.getCurrentUser();
+        if (active) setUser(current);
+      } catch (err) {
+        logger.warn("auth", "Failed to restore session", err);
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(nextUser));
-    setUser(nextUser);
   }, []);
 
-  const logout = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEY);
+  const signIn = useCallback(async (username: string, password: string) => {
+    const signedIn = await auth.signIn(username, password);
+    setUser(signedIn);
+  }, []);
+
+  const signOut = useCallback(async () => {
+    await auth.signOut();
     setUser(null);
   }, []);
+
+  const hasRole = useCallback(
+    (...roles: UserRole[]) => !!user && roles.some((r) => user.roles.includes(r)),
+    [user],
+  );
 
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
-      isAuthenticated: user !== null,
       loading,
-      login,
-      logout,
+      isAuthenticated: !!user,
+      cognitoConfigured: auth.isCognitoConfigured(),
+      signIn,
+      signOut,
+      hasRole,
     }),
-    [user, loading, login, logout]
+    [user, loading, signIn, signOut, hasRole],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-}
-
-export function useAuth(): AuthContextValue {
-  const ctx = useContext(AuthContext);
-  if (ctx === undefined) {
-    throw new Error("useAuth must be used within an AuthProvider");
-  }
-  return ctx;
 }

@@ -1,107 +1,124 @@
 /**
- * Login page - Cognito authentication form.
+ * Login page (AC-1.1.x).
  *
- * Dev mode: sign in locally by entering an email and choosing a role. No
- * Cognito call is made; the identity is stored via AuthContext. When Cognito
- * is provisioned, replace handleSubmit with a real sign-in call.
+ * In a Cognito-configured environment this collects username + password.
+ * In local development (no Cognito), it offers a role picker so reviewers can
+ * exercise role-based UI without a real user pool.
  */
 
-import { useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
-import { useAuth, type UserRole } from "../context/AuthContext";
+import { useState, type FormEvent } from "react";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 
-const ROLES: { value: UserRole; label: string }[] = [
-  { value: "ADMIN", label: "Admin" },
-  { value: "FINANCE_MANAGER", label: "Finance Manager" },
-  { value: "AP_CLERK", label: "AP Clerk" },
-  { value: "STAFF", label: "Staff" },
-];
+import { useAuth } from "@/context/useAuth";
+import { DEV_USERS } from "@/services/auth";
+import { logger } from "@/services/logger";
 
 interface LocationState {
-  from?: { pathname: string };
+  from?: string;
 }
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { signIn, isAuthenticated, cognitoConfigured } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [email, setEmail] = useState("dev@localhost");
-  const [role, setRole] = useState<UserRole>("ADMIN");
+  const [username, setUsername] = useState(cognitoConfigured ? "" : "admin");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const redirectTo =
-    (location.state as LocationState | null)?.from?.pathname ?? "/invoices";
+  const redirectTo = (location.state as LocationState | null)?.from ?? "/invoices";
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = email.trim();
-    if (!trimmed) {
-      setError("Please enter an email.");
-      return;
-    }
-    login(trimmed, role);
-    navigate(redirectTo, { replace: true });
+  // Declarative redirect — safe to evaluate during render (no side effect).
+  if (isAuthenticated) {
+    return <Navigate to={redirectTo} replace />;
   }
 
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setSubmitting(true);
+    try {
+      await signIn(username, password);
+      navigate(redirectTo, { replace: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Sign-in failed. Please try again.";
+      logger.warn("login", "Sign-in failed", err);
+      setError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
-      <div className="w-full max-w-sm">
-        <div className="mb-8 text-center">
-          <div className="mb-2 text-3xl font-bold tracking-tight text-blue-700">
-            ⚡ IntelliProcess AI
-          </div>
-          <p className="text-sm text-gray-500">Sign in to continue</p>
-        </div>
+    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
+      <div className="w-full max-w-sm rounded-xl bg-white p-8 shadow-lg">
+        <h1 className="text-center text-2xl font-bold text-slate-800">IntelliProcess AI</h1>
+        <p className="mt-1 text-center text-sm text-slate-500">
+          Sign in to continue
+        </p>
 
-        <form
-          onSubmit={handleSubmit}
-          className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm"
-        >
-          <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="email">
-            Email
-          </label>
-          <input
-            id="email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-            className="mb-4 w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm text-gray-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-          />
-
-          <label className="mb-1 block text-sm font-medium text-gray-700" htmlFor="role">
-            Role
-          </label>
-          <select
-            id="role"
-            value={role}
-            onChange={(e) => setRole(e.target.value as UserRole)}
-            className="mb-5 w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm text-gray-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-          >
-            {ROLES.map((r) => (
-              <option key={r.value} value={r.value}>
-                {r.label}
-              </option>
-            ))}
-          </select>
+        <form className="mt-6 space-y-4" onSubmit={handleSubmit}>
+          {cognitoConfigured ? (
+            <>
+              <label className="block">
+                <span className="text-sm font-medium text-slate-700">Email</span>
+                <input
+                  type="email"
+                  autoComplete="username"
+                  required
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+              </label>
+              <label className="block">
+                <span className="text-sm font-medium text-slate-700">Password</span>
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+              </label>
+            </>
+          ) : (
+            <label className="block">
+              <span className="text-sm font-medium text-slate-700">
+                Development role
+              </span>
+              <select
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              >
+                {Object.entries(DEV_USERS).map(([key, u]) => (
+                  <option key={key} value={key}>
+                    {u.roles.join(", ")} — {u.email}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block text-xs text-slate-400">
+                Cognito is not configured; using a local development session.
+              </span>
+            </label>
+          )}
 
           {error && (
-            <p className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 border border-red-200">
+            <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
               {error}
             </p>
           )}
 
           <button
             type="submit"
-            className="w-full rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-medium text-white shadow transition hover:bg-blue-800 active:scale-[0.99]"
+            disabled={submitting}
+            className="w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Sign in
+            {submitting ? "Signing in…" : "Sign in"}
           </button>
-
-          <p className="mt-4 text-center text-[11px] text-gray-400">
-            Local development sign-in. Cognito is not yet configured.
-          </p>
         </form>
       </div>
     </div>

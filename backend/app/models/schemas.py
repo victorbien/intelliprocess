@@ -1,5 +1,6 @@
 """Pydantic request/response models for all API endpoints."""
 
+import re
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field, field_validator
@@ -323,3 +324,185 @@ class ProcessTriggerRequest(BaseModel):
         return v
 
     model_config = {"populate_by_name": True}
+
+
+# ─── Dashboard Schemas (Module 4 — FR-AP-009, AC-3.9.x) ───────────────────────
+
+
+class RecentActivityItem(BaseModel):
+    """A single recent-activity entry on the dashboard."""
+
+    document_id: str = Field(..., alias="documentId")
+    file_name: str = Field(..., alias="fileName")
+    action: str
+    timestamp: str
+    actor: str
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class DashboardStatsResponse(BaseModel):
+    """Response body for GET /dashboard/stats.
+
+    Covers AC-3.9.1 (status counts) and AC-3.9.2 (current-state snapshot).
+    """
+
+    total_invoices: int = Field(..., alias="totalInvoices")
+    status_counts: dict[str, int] = Field(..., alias="statusCounts")
+    auto_approval_rate: float = Field(..., alias="autoApprovalRate")
+    avg_processing_time_sec: float = Field(..., alias="avgProcessingTimeSec")
+    recent_activity: list[RecentActivityItem] = Field(
+        default_factory=list, alias="recentActivity"
+    )
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Admin: Seed Data Schemas (Module 4 — AC-5.1.4) ───────────────────────────
+
+
+class SeedDataRequest(BaseModel):
+    """Request body for POST /admin/seed-data."""
+
+    data_set: str = Field("default", alias="dataSet", max_length=64)
+
+    model_config = {"populate_by_name": True}
+
+
+class SeedDataResponse(BaseModel):
+    """Response body for POST /admin/seed-data."""
+
+    message: str
+    purchase_orders_created: int = Field(..., alias="purchaseOrdersCreated")
+    goods_receipts_created: int = Field(..., alias="goodsReceiptsCreated")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Knowledge Base Sync Schemas (Module 4 — FR-CROSS-001) ────────────────────
+
+
+class KbSyncResponse(BaseModel):
+    """Response body for POST /documents/sync."""
+
+    message: str
+    sync_job_id: str | None = Field(None, alias="syncJobId")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Admin: Purchase Order Upload Schemas (Module 4 — AC-5.1.1, AC-5.1.3) ──────
+
+
+# Identifiers used as DynamoDB keys / GSI partition values (PO numbers, GR ids).
+# Restricted to a safe, predictable character set to prevent malformed keys.
+_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+
+def _validate_identifier(v: str, field: str) -> str:
+    """Validate and normalise a key-like identifier (PO number, GR id)."""
+    v = v.strip()
+    if not v:
+        raise ValueError(f"{field} cannot be blank.")
+    if not _IDENTIFIER_PATTERN.match(v):
+        raise ValueError(
+            f"{field} may only contain letters, numbers, and the characters . _ / -"
+        )
+    return v
+
+
+class PurchaseOrderUploadRequest(BaseModel):
+    """Request body for POST /purchase-orders/upload.
+
+    Admin uploads a structured PO record so the matcher can compare
+    future invoices against it (three-way match, FR-AP-003).
+    """
+
+    po_number: str = Field(..., alias="poNumber", min_length=1, max_length=64)
+    vendor_name: str = Field(..., alias="vendorName", min_length=1, max_length=255)
+    total_amount: float = Field(..., alias="totalAmount", gt=0)
+    currency: str = Field("USD", min_length=3, max_length=3)
+    created_date: str | None = Field(None, alias="createdDate")
+    department: str | None = Field(None, max_length=128)
+    vendor_id: str | None = Field(None, alias="vendorId", max_length=64)
+
+    @field_validator("po_number")
+    @classmethod
+    def validate_po_number(cls, v: str) -> str:
+        return _validate_identifier(v, "poNumber")
+
+    @field_validator("vendor_name")
+    @classmethod
+    def vendor_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("vendorName cannot be blank.")
+        return v.strip()
+
+    @field_validator("currency")
+    @classmethod
+    def normalise_currency(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not v.isalpha():
+            raise ValueError("currency must be a 3-letter ISO code (e.g. USD).")
+        return v
+
+    model_config = {"populate_by_name": True}
+
+
+class PurchaseOrderUploadResponse(BaseModel):
+    """Response body for POST /purchase-orders/upload."""
+
+    po_number: str = Field(..., alias="poNumber")
+    message: str = "Purchase order stored and available for matching."
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Admin: Goods Receipt Upload Schemas (Module 4 — AC-5.1.2, AC-5.1.3) ───────
+
+
+class GoodsReceiptUploadRequest(BaseModel):
+    """Request body for POST /goods-receipts/upload.
+
+    Admin uploads a structured GR record linked to a PO so the matcher
+    can confirm receipt during three-way match (FR-AP-004).
+    """
+
+    gr_id: str = Field(..., alias="grId", min_length=1, max_length=64)
+    po_number: str = Field(..., alias="poNumber", min_length=1, max_length=64)
+    total_quantity_received: float = Field(
+        ..., alias="totalQuantityReceived", gt=0
+    )
+    received_date: str | None = Field(None, alias="receivedDate")
+    status: str = Field("COMPLETE", max_length=32)
+
+    @field_validator("gr_id")
+    @classmethod
+    def validate_gr_id(cls, v: str) -> str:
+        return _validate_identifier(v, "grId")
+
+    @field_validator("po_number")
+    @classmethod
+    def validate_po_number(cls, v: str) -> str:
+        return _validate_identifier(v, "poNumber")
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        allowed = {"COMPLETE", "PARTIAL", "PENDING"}
+        v = v.strip().upper()
+        if v not in allowed:
+            raise ValueError(f"status must be one of {sorted(allowed)}")
+        return v
+
+    model_config = {"populate_by_name": True}
+
+
+class GoodsReceiptUploadResponse(BaseModel):
+    """Response body for POST /goods-receipts/upload."""
+
+    gr_id: str = Field(..., alias="grId")
+    po_number: str = Field(..., alias="poNumber")
+    message: str = "Goods receipt stored and linked to the purchase order."
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}

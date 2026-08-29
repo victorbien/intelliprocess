@@ -28,14 +28,14 @@ Acceptance Criteria: AC-3.1.x through AC-3.9.x
 
 | # | Task | Status |
 |---|------|--------|
-| 2.1 | BDA extraction service — invoke BDA, parse response | [ ] |
-| 2.2 | PO matching service — exact + fuzzy match logic | [ ] |
-| 2.3 | GR matching service — quantity verification with tolerance | [ ] |
-| 2.4 | Three-way match orchestration | [ ] |
-| 2.5 | Approval rules engine — evaluate 4 rules, route escalations | [ ] |
-| 2.6 | Invoice processor — full pipeline orchestration (S3 trigger) | [ ] |
-| 2.7 | Manual approval endpoint — POST /invoices/{id}/approve | [ ] |
-| 2.8 | Unit tests — matcher, rules, processor | [ ] |
+| 2.1 | BDA extraction service — invoke BDA, parse response | [x] |
+| 2.2 | PO matching service — exact + fuzzy match logic | [x] |
+| 2.3 | GR matching service — quantity verification with tolerance | [x] |
+| 2.4 | Three-way match orchestration | [x] |
+| 2.5 | Approval rules engine — evaluate 4 rules, route escalations | [x] |
+| 2.6 | Invoice processor — full pipeline orchestration (S3 trigger) | [x] |
+| 2.7 | Manual approval endpoint — POST /invoices/{id}/approve | [x] |
+| 2.8 | Unit tests — matcher, rules, processor | [x] |
 
 ---
 
@@ -63,12 +63,12 @@ Acceptance Criteria: AC-3.9.x, AC-5.1.x, AC-5.2.x
 
 | # | Task | Status |
 |---|------|--------|
-| 4.1 | Dashboard stats aggregation — GET /dashboard/stats | [ ] |
-| 4.2 | Seed data endpoint — POST /admin/seed-data | [ ] |
-| 4.3 | KB sync trigger — POST /documents/sync | [ ] |
-| 4.4 | Purchase Order upload — POST /purchase-orders/upload (Admin uploads PO document → stored in DynamoDB for matching) | [ ] |
-| 4.5 | Goods Receipt upload — POST /goods-receipts/upload (Admin uploads GR document → stored in DynamoDB for three-way match) | [ ] |
-| 4.6 | Unit tests — dashboard handler | [ ] |
+| 4.1 | Dashboard stats aggregation — GET /dashboard/stats | [x] |
+| 4.2 | Seed data endpoint — POST /admin/seed-data | [x] |
+| 4.3 | KB sync trigger — POST /documents/sync | [x] |
+| 4.4 | Purchase Order upload — POST /purchase-orders/upload (Admin uploads PO document → stored in DynamoDB for matching) | [x] |
+| 4.5 | Goods Receipt upload — POST /goods-receipts/upload (Admin uploads GR document → stored in DynamoDB for three-way match) | [x] |
+| 4.6 | Unit tests — dashboard handler | [x] |
 
 ---
 
@@ -76,9 +76,9 @@ Acceptance Criteria: AC-3.9.x, AC-5.1.x, AC-5.2.x
 
 | # | Task | Status |
 |---|------|--------|
-| 5.1 | Auth flow — login, protected routes, role context | [ ] |
-| 5.2 | Invoice upload component — drag-drop, validation | [ ] |
-| 5.3 | Invoice list + detail views | [ ] |
-| 5.4 | Chat interface — messages, citations, category filter | [ ] |
-| 5.5 | Dashboard — stats cards, recent activity | [ ] |
-| 5.6 | Admin page — document upload, seed data, KB sync | [ ] |
+| 5.1 | Auth flow — login, protected routes, role context | [x] |
+| 5.2 | Invoice upload component — drag-drop, validation | [x] |
+| 5.3 | Invoice list + detail views | [x] |
+| 5.4 | Chat interface — messages, citations, category filter | [x] |
+| 5.5 | Dashboard — stats cards, recent activity | [x] |
+| 5.6 | Admin page — document upload, seed data, KB sync | [x] |

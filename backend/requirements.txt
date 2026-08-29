@@ -1,8 +1,18 @@
-fastapi==0.115.0
+﻿fastapi==0.115.0
 uvicorn[standard]==0.30.0
 mangum==0.17.0
-pydantic==2.9.0
-pydantic-settings==2.5.0
-boto3==1.35.0
+# pydantic / pydantic-settings are pinned to ranges (not exact) because
+# strands-agents -> mcp requires pydantic-settings>=2.5.2. FastAPI 0.115.0
+# is compatible with pydantic 2.13.x.
+pydantic>=2.9.0,<3.0.0
+pydantic-settings>=2.5.2,<3.0.0
+# boto3 >= 1.37 is required for the current Bedrock Data Automation API
+# (InvokeDataAutomationAsync needs dataAutomationProfileArn). Verified on 1.43.x.
+boto3>=1.37.0,<2.0.0
 python-multipart==0.0.9
 python-dateutil==2.9.0
+strands-agents==0.3.0
+# Pin starlette to a FastAPI 0.115-compatible range.
+# The mcp dependency (pulled in by strands-agents) otherwise upgrades
+# starlette past the version FastAPI 0.115.0 supports.
+starlette>=0.37.2,<0.39.0

@@ -10,7 +10,8 @@ from mangum import Mangum
 from app.config import settings
 
 # ── Local dev: activate moto mocks before any boto3 client is created ─────────
-_USE_MOCKS = settings.STAGE == "dev" and os.environ.get("USE_MOCKS", "true").lower() == "true"
+# _USE_MOCKS = settings.STAGE == "dev" and os.environ.get("USE_MOCKS", "true").lower() == "true" --modify by Danae
+_USE_MOCKS = settings.STAGE == "dev" and settings.USE_MOCKS
 if _USE_MOCKS:
     from app.dev_mock import start as _start_mocks
     _start_mocks()
@@ -37,6 +38,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    # Allow any localhost/127.0.0.1 port in dev so the app works regardless of
+    # which port Vite selects (5173, 5174, ...).
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

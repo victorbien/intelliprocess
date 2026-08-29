@@ -24,6 +24,7 @@ from decimal import Decimal
 from typing import Any
 
 from botocore.exceptions import ClientError
+from strands import tool
 
 from app.config import settings
 from app.services.dynamo import DynamoClient
@@ -57,6 +58,7 @@ def _convert_decimals(obj: Any) -> Any:
 
 # ── Invoice tools ─────────────────────────────────────────────────────────────
 
+@tool
 def query_invoices(
     vendor_name: str | None = None,
     status: str | None = None,
@@ -181,6 +183,7 @@ def query_invoices(
     }
 
 
+@tool
 def count_invoices_by_status() -> dict[str, int]:
     """Return a count of invoices grouped by status.
 
@@ -198,6 +201,7 @@ def count_invoices_by_status() -> dict[str, int]:
     return _invoice_client.scan_count_by_status()
 
 
+@tool
 def get_invoice_detail(document_id: str) -> dict[str, Any] | None:
     """Retrieve the full record for a single invoice by its document ID.
 
@@ -225,6 +229,7 @@ def get_invoice_detail(document_id: str) -> dict[str, Any] | None:
 
 # ── Purchase Order tools ──────────────────────────────────────────────────────
 
+@tool
 def query_purchase_orders(
     po_number: str | None = None,
     vendor_name: str | None = None,
@@ -296,6 +301,7 @@ def query_purchase_orders(
 
 # ── Goods Receipt tools ───────────────────────────────────────────────────────
 
+@tool
 def query_goods_receipts(po_number: str) -> dict[str, Any]:
     """Retrieve all goods receipts linked to a specific purchase order.
 
@@ -335,3 +341,200 @@ def query_goods_receipts(po_number: str) -> dict[str, Any]:
         "count": len(converted),
         "all_complete": all_complete,
     }
+
+# ── Supplier analytics tools ──────────────────────────────────────────────────
+
+def _scan_all_invoices() -> list[dict]:
+    """Return every invoice item, paginating the table scan to exhaustion.
+
+    Aggregation tools must observe all records to produce accurate totals, so
+    this helper walks ``LastEvaluatedKey`` until DynamoDB reports no more pages.
+    ``ClientError`` is logged and re-raised, consistent with ``query_invoices``.
+    """
+    try:
+        response = _invoice_client.table.scan()
+        items: list[dict] = response.get("Items", [])
+        while "LastEvaluatedKey" in response:
+            response = _invoice_client.table.scan(
+                ExclusiveStartKey=response["LastEvaluatedKey"],
+            )
+            items.extend(response.get("Items", []))
+        return items
+    except ClientError:
+        logger.exception("tools._scan_all_invoices scan failed")
+        raise
+
+
+@tool
+def top_suppliers(limit: int = 10) -> dict[str, Any]:
+    """Rank suppliers by total invoice spend.
+
+    Use this tool when the user asks which vendors account for the most
+    spend or business — for example:
+    - "Who are our top suppliers?"
+    - "Which vendors do we spend the most with?"
+    - "Show me the top 5 suppliers by total invoiced amount."
+
+    Parameters
+    ----------
+    limit:
+        Maximum number of suppliers to return (capped at 10). Defaults to 10.
+
+    Returns
+    -------
+    dict with keys:
+        ``suppliers`` — list of {vendorName, totalAmount, invoiceCount},
+                        sorted by totalAmount descending, length <= 10,
+        ``count``     — number of suppliers in the ranked list.
+    """
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
+
+    for inv in _scan_all_invoices():
+        extraction = inv.get("extraction")
+        if not extraction:
+            # Skip invoices without an extraction block (e.g. PROCESSING).
+            continue
+        vendor = extraction.get("vendorName")
+        if vendor is None:
+            continue
+        amount = extraction.get("totalAmount")
+        totals[vendor] = totals.get(vendor, 0.0) + (
+            float(amount) if amount is not None else 0.0
+        )
+        counts[vendor] = counts.get(vendor, 0) + 1
+
+    ranked = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
+    cap = min(limit, 10)
+    suppliers = [
+        {
+            "vendorName": vendor,
+            "totalAmount": total,
+            "invoiceCount": counts[vendor],
+        }
+        for vendor, total in ranked[:cap]
+    ]
+
+    return _convert_decimals({"suppliers": suppliers, "count": len(suppliers)})
+
+
+@tool
+def supplier_order_accuracy(limit: int = 10) -> dict[str, Any]:
+    """Rank suppliers by order accuracy (three-way match rate).
+
+    Use this tool when the user asks which vendors are most reliable against
+    purchase orders and goods receipts — for example:
+    - "Which suppliers have the best order accuracy?"
+    - "Rank vendors by match rate."
+    - "Who are our most reliable suppliers?"
+
+    Parameters
+    ----------
+    limit:
+        Maximum number of suppliers to return (capped at 10). Defaults to 10.
+
+    Returns
+    -------
+    dict with keys:
+        ``suppliers`` — list of {vendorName, matchRate, invoicesEvaluated},
+                        sorted by matchRate descending, length <= 10,
+        ``count``     — number of suppliers in the ranked list.
+    """
+    evaluated: dict[str, int] = {}
+    matched: dict[str, int] = {}
+
+    for inv in _scan_all_invoices():
+        extraction = inv.get("extraction") or {}
+        vendor = extraction.get("vendorName")
+        if vendor is None:
+            continue
+        match_result = inv.get("matchResult")
+        if not match_result:
+            # Only invoices carrying a matchResult block are evaluated.
+            continue
+        evaluated[vendor] = evaluated.get(vendor, 0) + 1
+        # The authoritative accuracy verdict is the overall three-way match
+        # result. poMatch/grMatch carry their own vocabularies
+        # ("MATCHED"/"CONFIRMED"), while threeWayMatch is "PASS" only when both
+        # the purchase order and goods receipt reconcile.
+        if match_result.get("threeWayMatch") == "PASS":
+            matched[vendor] = matched.get(vendor, 0) + 1
+
+    suppliers_all = []
+    for vendor, evaluated_count in evaluated.items():
+        if evaluated_count == 0:
+            # Guard against zero denominator; exclude from ranking.
+            continue
+        match_rate = matched.get(vendor, 0) / evaluated_count
+        suppliers_all.append(
+            {
+                "vendorName": vendor,
+                "matchRate": match_rate,
+                "invoicesEvaluated": evaluated_count,
+            }
+        )
+
+    suppliers_all.sort(key=lambda s: s["matchRate"], reverse=True)
+    cap = min(limit, 10)
+    suppliers = suppliers_all[:cap]
+
+    return _convert_decimals({"suppliers": suppliers, "count": len(suppliers)})
+
+
+@tool
+def supplier_lowest_prices() -> dict[str, Any]:
+    """Compare suppliers by average pricing.
+
+    Use this tool when the user asks which vendors are cheapest or wants a
+    price comparison — for example:
+    - "Which suppliers have the lowest prices?"
+    - "Compare vendors by average invoice amount."
+    - "What's the average line-item price per supplier?"
+
+    Returns
+    -------
+    dict with keys:
+        ``suppliers`` — list of {vendorName, avgInvoiceAmount, avgUnitPrice},
+                        where avgUnitPrice is null for suppliers with no line
+                        items,
+        ``count``     — number of suppliers reported.
+    """
+    invoice_amounts: dict[str, list[float]] = {}
+    unit_prices: dict[str, list[float]] = {}
+
+    for inv in _scan_all_invoices():
+        extraction = inv.get("extraction")
+        if not extraction:
+            # Skip invoices without an extraction block.
+            continue
+        vendor = extraction.get("vendorName")
+        if vendor is None:
+            continue
+
+        invoice_amounts.setdefault(vendor, [])
+        unit_prices.setdefault(vendor, [])
+
+        amount = extraction.get("totalAmount")
+        if amount is not None:
+            invoice_amounts[vendor].append(float(amount))
+
+        for item in extraction.get("lineItems") or []:
+            unit_price = (item or {}).get("unitPrice")
+            if unit_price is not None:
+                unit_prices[vendor].append(float(unit_price))
+
+    suppliers = []
+    for vendor in invoice_amounts:
+        amounts = invoice_amounts[vendor]
+        prices = unit_prices.get(vendor, [])
+        avg_invoice_amount = sum(amounts) / len(amounts) if amounts else 0.0
+        avg_unit_price = sum(prices) / len(prices) if prices else None
+        suppliers.append(
+            {
+                "vendorName": vendor,
+                "avgInvoiceAmount": avg_invoice_amount,
+                "avgUnitPrice": avg_unit_price,
+            }
+        )
+
+    return _convert_decimals({"suppliers": suppliers, "count": len(suppliers)})

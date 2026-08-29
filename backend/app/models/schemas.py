@@ -286,6 +286,18 @@ class ChatSessionSummary(BaseModel):
     first_message: str = Field(..., alias="firstMessage")
     last_activity: str = Field(..., alias="lastActivity")
     message_count: int = Field(..., alias="messageCount")
+    summary: str | None = None
+    summary_generated_at: str | None = Field(None, alias="summaryGeneratedAt")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class ChatSummaryResponse(BaseModel):
+    """Response body for POST /chat/sessions/{id}/summary."""
+
+    session_id: str = Field(..., alias="sessionId")
+    summary: str
+    generated_at: str = Field(..., alias="generatedAt")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
 

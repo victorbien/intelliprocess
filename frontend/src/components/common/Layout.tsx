@@ -1,4 +1,5 @@
-import { Outlet, NavLink } from "react-router-dom";
+import { Outlet, NavLink, useNavigate } from "react-router-dom";
+import { useAuth } from "../../context/AuthContext";
 
 const NAV = [
   { to: "/invoices", label: "📄 Invoices" },
@@ -7,6 +8,14 @@ const NAV = [
 ];
 
 export default function Layout() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  function handleLogout() {
+    logout();
+    navigate("/login", { replace: true });
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       {/* Top bar */}
@@ -15,7 +24,7 @@ export default function Layout() {
           <span className="font-bold text-lg tracking-tight">
             ⚡ IntelliProcess AI
           </span>
-          <nav className="flex gap-6">
+          <nav className="flex items-center gap-6">
             {NAV.map(({ to, label }) => (
               <NavLink
                 key={to}
@@ -31,6 +40,24 @@ export default function Layout() {
                 {label}
               </NavLink>
             ))}
+
+            {user && (
+              <div className="flex items-center gap-3 border-l border-blue-500 pl-6">
+                <span className="text-xs text-blue-100" title={user.email}>
+                  {user.email}
+                  <span className="ml-1 rounded bg-blue-800 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+                    {user.role}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="rounded-md bg-blue-800 px-3 py-1 text-xs font-medium text-white transition hover:bg-blue-900"
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
           </nav>
         </div>
       </header>

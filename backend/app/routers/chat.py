@@ -2,19 +2,16 @@
 
 Endpoints
 ---------
-POST /chat
-    Classify the question, route to the correct data source, persist both
-    turns, and return a structured response.
-
-GET /chat/sessions
-    Return the current user's recent sessions, ordered by most-recent activity.
-
-GET /chat/sessions/{session_id}
-    Return full message history for one session (owner only).
+POST /chat          Synchronous chat via AgentService (backward compatible).
+POST /chat/stream   SSE streaming chat via AgentService.
+GET  /chat/sessions List user sessions.
+GET  /chat/sessions/{session_id} Session detail.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 import uuid
@@ -22,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Path, Query
+from fastapi.responses import StreamingResponse
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
@@ -33,22 +31,12 @@ from app.models.schemas import (
     ChatResponse,
     ChatSessionDetail,
     ChatSessionSummary,
+    ChatSummaryResponse,
     ChatMessage,
 )
 from app.services.dynamo import DynamoClient
-from app.services.intent import (
-    INTENT_DOCUMENT,
-    INTENT_HYBRID,
-    INTENT_STRUCTURED,
-    classify,
-)
-from app.services.tools import (
-    count_invoices_by_status,
-    get_invoice_detail,
-    query_goods_receipts,
-    query_invoices,
-    query_purchase_orders,
-)
+from app.services.agent import AgentService
+from app.services.bedrock import BedrockService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -56,7 +44,87 @@ router = APIRouter()
 _conv_db = DynamoClient(settings.CONVERSATION_TABLE)
 
 
-# ── POST /chat ────────────────────────────────────────────────────────────────
+# -- SSE Helpers ---------------------------------------------------------------
+
+
+def _sse(event_type: str, payload: dict) -> bytes:
+    """Serialize an event dict to SSE data line bytes."""
+    data = json.dumps({"type": event_type, **payload})
+    return f"data: {data}\n\n".encode()
+
+
+async def _keepalive_wrapper(gen, interval: int = 15):
+    """Wrap an async generator, injecting ping events during idle periods."""
+    ping = b'data: {"type": "ping"}\n\n'
+    try:
+        ait = gen.__aiter__()
+        while True:
+            try:
+                chunk = await asyncio.wait_for(ait.__anext__(), timeout=interval)
+                yield chunk
+            except asyncio.TimeoutError:
+                yield ping
+            except StopAsyncIteration:
+                break
+    except GeneratorExit:
+        pass
+
+
+# -- POST /chat/stream ---------------------------------------------------------
+
+
+@router.post("/stream")
+async def post_chat_stream(
+    body: ChatRequest,
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+):
+    """SSE streaming endpoint for the Records Assistant."""
+    session_id = body.session_id or str(uuid.uuid4())
+
+    async def event_generator():
+        full_answer_parts: list[str] = []
+        try:
+            async for event in AgentService.stream_answer(
+                question=body.question,
+                session_id=session_id,
+                user=user,
+                category_filter=body.category_filter,
+            ):
+                if event["type"] == "token":
+                    full_answer_parts.append(event["content"])
+                    yield _sse("token", {"content": event["content"]})
+                elif event["type"] == "done":
+                    yield _sse("done", {
+                        "sessionId": event["sessionId"],
+                        "sourceType": event["sourceType"],
+                        "citations": event["citations"],
+                        "dataSnapshot": event.get("dataSnapshot"),
+                    })
+                elif event["type"] == "error":
+                    yield _sse("error", {"message": event["message"]})
+                    return
+        except Exception as exc:
+            logger.exception("Stream failed for session %s", session_id)
+            yield _sse("error", {"message": str(exc)})
+            return
+
+        # Persist after done event
+        full_answer = "".join(full_answer_parts)
+        _persist_both_turns(
+            session_id=session_id,
+            user_id=user.user_id,
+            question=body.question,
+            answer=full_answer,
+        )
+
+    return StreamingResponse(
+        _keepalive_wrapper(event_generator(), interval=15),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# -- POST /chat (backward compatible) -----------------------------------------
 
 
 @router.post("", response_model=ApiResponse[ChatResponse])
@@ -64,97 +132,41 @@ async def post_chat(
     body: ChatRequest,
     user: Annotated[CurrentUser, Depends(get_current_user)],
 ):
-    """Submit a natural-language question to the Records Assistant.
-
-    The endpoint classifies the question, routes to the appropriate handler,
-    persists both turns to the conversation table, and returns the answer.
-    """
+    """Submit a question to the Records Assistant (synchronous response)."""
     t_start = time.monotonic()
     session_id = body.session_id or str(uuid.uuid4())
-    question = body.question
 
-    # ── Classify intent ───────────────────────────────────────────────────────
-    classification = classify(question)
-    intent: str = classification["intent"]
-    params: dict[str, Any] = classification["params"]
-    confidence: float | None = classification["confidence"]
-
-    logger.info(
-        "Chat request classified",
-        extra={
-            "userId": user.user_id[:6] + "****",
-            "sessionId": session_id,
-            "intent": intent,
-            "confidence": confidence,
-        },
+    result = await AgentService.answer(
+        question=body.question,
+        session_id=session_id,
+        user=user,
+        category_filter=body.category_filter,
     )
-
-    # ── Route to handler ──────────────────────────────────────────────────────
-    if intent == INTENT_STRUCTURED:
-        answer, data_snapshot, citations = _handle_structured(
-            question, params, user
-        )
-        source_type = INTENT_STRUCTURED
-        unavailable = None
-    elif intent == INTENT_HYBRID:
-        # Hybrid: try structured first, document search may be unavailable
-        struct_answer, data_snapshot, citations = _handle_structured(
-            question, params, user
-        )
-        doc_answer, doc_unavailable = _handle_document(question, body.category_filter)
-        if doc_unavailable:
-            answer = struct_answer
-            source_type = INTENT_STRUCTURED
-            unavailable = None
-        else:
-            answer = f"{struct_answer}\n\n{doc_answer}"
-            source_type = INTENT_HYBRID
-            unavailable = None
-    else:
-        # document_search
-        answer, doc_unavailable = _handle_document(question, body.category_filter)
-        data_snapshot = None
-        citations = []
-        source_type = INTENT_DOCUMENT
-        unavailable = True if doc_unavailable else None
 
     elapsed_ms = int((time.monotonic() - t_start) * 1000)
 
-    # ── Persist both turns ────────────────────────────────────────────────────
-    now = _utcnow()
-    _persist_turn(
+    # Persist both turns
+    _persist_both_turns(
         session_id=session_id,
         user_id=user.user_id,
-        role="user",
-        content=question,
-        intent=intent,
-        timestamp=now,
-    )
-    _persist_turn(
-        session_id=session_id,
-        user_id=user.user_id,
-        role="assistant",
-        content=answer,
-        intent=intent,
-        timestamp=_utcnow(),  # slightly after user turn
-        citations=[c.model_dump(by_alias=True) for c in citations],
-        source_type=source_type,
+        question=body.question,
+        answer=result["answer"],
     )
 
     return ApiResponse(
         data=ChatResponse(
-            answer=answer,
-            citations=citations,
+            answer=result["answer"],
+            citations=[],
             sessionId=session_id,
-            sourceType=source_type,
-            dataSnapshot=data_snapshot,
-            unavailable=unavailable,
+            sourceType="agent",
+            dataSnapshot=None,
+            unavailable=None,
             responseTimeMs=elapsed_ms,
         )
     )
 
 
-# ── GET /chat/sessions ────────────────────────────────────────────────────────
+# -- GET /chat/sessions --------------------------------------------------------
 
 
 @router.get("/sessions", response_model=ApiResponse[list[ChatSessionSummary]])
@@ -199,22 +211,32 @@ async def list_sessions(
         except ClientError:
             msgs = []
 
+        # Separate the stored summary record (if any) from conversation turns.
+        turns = [m for m in msgs if m.get("role") != "summary"]
+        summary_item = next(
+            (m for m in msgs if m.get("role") == "summary"), None
+        )
+
         first_msg = next(
-            (m["content"] for m in msgs if m.get("role") == "user"), ""
+            (m["content"] for m in turns if m.get("role") == "user"), ""
         )
         summaries.append(
             ChatSessionSummary(
                 sessionId=session_id,
                 firstMessage=first_msg[:120],
                 lastActivity=last_ts,
-                messageCount=len(msgs),
+                messageCount=len(turns),
+                summary=summary_item.get("content") if summary_item else None,
+                summaryGeneratedAt=(
+                    summary_item.get("generatedAt") if summary_item else None
+                ),
             )
         )
 
     return ApiResponse(data=summaries)
 
 
-# ── GET /chat/sessions/{session_id} ──────────────────────────────────────────
+# -- GET /chat/sessions/{session_id} -------------------------------------------
 
 
 @router.get(
@@ -252,220 +274,135 @@ async def get_session(
             sourceType=item.get("source_type"),
         )
         for item in items
+        if item.get("role") != "summary"
     ]
 
     return ApiResponse(data=ChatSessionDetail(sessionId=session_id, messages=messages))
 
 
-# ── Handlers ──────────────────────────────────────────────────────────────────
+# -- POST /chat/sessions/{session_id}/summary ----------------------------------
 
 
-def _handle_structured(
-    question: str,
-    params: dict[str, Any],
-    user: CurrentUser,
-) -> tuple[str, dict[str, Any] | None, list]:
-    """Route a structured_query to the appropriate tool(s) and format an answer."""
-    from app.models.enums import UserRole
+@router.post(
+    "/sessions/{session_id}/summary",
+    response_model=ApiResponse[ChatSummaryResponse],
+)
+async def summarize_session(
+    session_id: Annotated[str, Path(min_length=1, max_length=64)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+):
+    """Generate and store an AI summary of a session (owner only).
 
-    q_lower = question.lower()
-
-    # Determine user scope for invoice queries
-    user_scope = (
-        user.user_id
-        if not user.has_role(UserRole.FINANCE_MANAGER, UserRole.ADMIN)
-        else None
-    )
-
-    # ── PO lookup ────────────────────────────────────────────────────────────
-    po_number = params.get("po_number")
-    if po_number or any(k in q_lower for k in ("purchase order", " po ", "po-")):
-        result = query_purchase_orders(po_number=po_number)
-        if result["count"] == 0:
-            answer = f"No purchase orders found{_po_qualifier(po_number)}."
-        else:
-            pos = result["purchase_orders"]
-            lines = [
-                f"- {p['poNumber']}: {p.get('vendorName', 'Unknown')} — "
-                f"{p.get('status', 'Unknown')} — ${_fmt(p.get('totalAmount', 0))}"
-                for p in pos[:10]
-            ]
-            answer = (
-                f"Found {result['count']} purchase order(s)"
-                f"{_po_qualifier(po_number)}:\n" + "\n".join(lines)
-            )
-            # If there's a PO, also show GRs
-            if po_number:
-                gr_result = query_goods_receipts(po_number)
-                if gr_result["count"] > 0:
-                    gr_status = "complete" if gr_result["all_complete"] else "pending"
-                    answer += (
-                        f"\n\nGoods receipt for {po_number}: "
-                        f"{gr_result['count']} receipt(s), status: {gr_status}."
-                    )
-        snapshot = {"purchase_orders": result["count"]}
-        return answer, snapshot, []
-
-    # ── Goods receipt lookup ─────────────────────────────────────────────────
-    if any(k in q_lower for k in ("goods receipt", " gr ", "gr-", "received", "delivery")):
-        if po_number:
-            result = query_goods_receipts(po_number)
-            if result["count"] == 0:
-                answer = f"No goods receipts found for {po_number}."
-            else:
-                status_word = "complete" if result["all_complete"] else "pending"
-                answer = (
-                    f"Found {result['count']} goods receipt(s) for {po_number}. "
-                    f"All receipts are {status_word}."
-                )
-            snapshot = {"po_number": po_number, "receipts": result["count"]}
-            return answer, snapshot, []
-
-    # ── "how many" / count questions ─────────────────────────────────────────
-    if any(k in q_lower for k in ("how many", "count", "total number", "number of")):
-        # If a specific status was extracted, use query_invoices for accuracy
-        status = params.get("status")
-        if status:
-            result = query_invoices(
-                status=status,
-                vendor_name=_scope_vendor(params, user_scope),
-            )
-            answer = (
-                f"There are {result['count']} invoice(s) with status {status}."
-            )
-            if result["total_amount"] > 0:
-                answer += f" Total amount: ${_fmt(result['total_amount'])}."
-            snapshot = {
-                "status": status,
-                "count": result["count"],
-                "total_amount": result["total_amount"],
-            }
-        else:
-            # Return full status breakdown
-            counts = count_invoices_by_status()
-            total = sum(counts.values())
-            lines = [f"  {s}: {n}" for s, n in sorted(counts.items())]
-            answer = f"There are {total} invoice(s) in total:\n" + "\n".join(lines)
-            snapshot = {"counts_by_status": counts, "total": total}
-        return answer, snapshot, []
-
-    # ── Invoice queries (with optional status / vendor / amount) ─────────────
-    status = params.get("status")
-    vendor_name = params.get("vendor_name")
-    amount_min = params.get("amount_min")
-    amount_max = params.get("amount_max")
-
-    # Apply user scope: AP clerks only see their own invoices
-    # tools.query_invoices handles uploadedBy filtering via GSI-UserDate when
-    # status is None; when status is set it fetches by GSI then filters below.
-    result = query_invoices(
-        status=status,
-        vendor_name=vendor_name,
-        amount_min=amount_min,
-        amount_max=amount_max,
-    )
-
-    # For AP_CLERK, filter results to own invoices
-    if user_scope:
-        result["invoices"] = [
-            inv for inv in result["invoices"]
-            if inv.get("uploadedBy") == user_scope
-        ]
-        result["count"] = len(result["invoices"])
-        result["total_amount"] = sum(
-            float(inv.get("extraction", {}).get("totalAmount", 0) or 0)
-            for inv in result["invoices"]
-        )
-
-    if result["count"] == 0:
-        answer = "No invoices found matching your criteria."
-    else:
-        qualifier_parts: list[str] = []
-        if status:
-            qualifier_parts.append(f"status {status}")
-        if vendor_name:
-            qualifier_parts.append(f"vendor containing '{vendor_name}'")
-        if amount_min:
-            qualifier_parts.append(f"amount ≥ ${_fmt(amount_min)}")
-        if amount_max:
-            qualifier_parts.append(f"amount ≤ ${_fmt(amount_max)}")
-        qualifier = f" ({', '.join(qualifier_parts)})" if qualifier_parts else ""
-
-        answer = (
-            f"Found {result['count']} invoice(s){qualifier}. "
-            f"Total amount: ${_fmt(result['total_amount'])}."
-        )
-
-        # Show up to 5 invoice summaries
-        preview = result["invoices"][:5]
-        if preview:
-            lines = []
-            for inv in preview:
-                ext = inv.get("extraction") or {}
-                vendor = ext.get("vendorName", "Unknown vendor")
-                amount = ext.get("totalAmount", 0) or 0
-                lines.append(
-                    f"  - {inv.get('fileName', inv['documentId'])}: "
-                    f"{vendor} — ${_fmt(amount)} — {inv['status']}"
-                )
-            answer += "\n\n" + "\n".join(lines)
-            if result["count"] > 5:
-                answer += f"\n  … and {result['count'] - 5} more."
-
-    snapshot = {
-        "count": result["count"],
-        "total_amount": result["total_amount"],
-        "filters": {k: v for k, v in {
-            "status": status,
-            "vendor_name": vendor_name,
-            "amount_min": amount_min,
-            "amount_max": amount_max,
-        }.items() if v is not None},
-    }
-    return answer, snapshot, []
-
-
-def _handle_document(
-    question: str,
-    category_filter: str | None,
-) -> tuple[str, bool]:
-    """Handle a document_search intent.
-
-    Returns (answer_text, is_unavailable).
-    When running in dev mode or KNOWLEDGE_BASE_ID is not a real KB ID
-    (empty, unset, or placeholder), returns a polite unavailable message.
+    Loads the session's conversation turns, generates a summary via
+    ``BedrockService.invoke_model``, and persists it as a dedicated summary
+    record. The summary is generated first and persisted only on success, so a
+    model failure leaves ``CONVERSATION_TABLE`` unchanged (Req 6.5).
     """
-    kb_id = (settings.KNOWLEDGE_BASE_ID or "").strip()
-    # Treat empty strings, "PLACEHOLDER", and any non-UUID-like value < 8 chars
-    # as unconfigured. A real Bedrock KB ID looks like "abc12345-...".
-    is_placeholder = not kb_id or kb_id.upper() in ("PLACEHOLDER", "NONE", "N/A") or len(kb_id) < 8
-    if settings.STAGE == "dev" or is_placeholder:
-        return (
-            "Document search is not available in the local development environment. "
-            "Please deploy to AWS with a configured Bedrock Knowledge Base to use "
-            "this feature.",
-            True,
-        )
-
-    # Production path — delegate to Bedrock service
     try:
-        from app.services.bedrock import BedrockService  # noqa: PLC0415
-        client = BedrockService()
-        result = client.retrieve_and_generate(
-            question=question,
-            knowledge_base_id=kb_id,
-            category_filter=category_filter,
+        response = _conv_db.table.query(
+            KeyConditionExpression=Key("sessionId").eq(session_id),
+            ScanIndexForward=True,
         )
-        return result.get("answer", "No relevant information found."), False
-    except Exception:
-        logger.exception("Bedrock retrieve_and_generate failed")
-        raise AppError(
-            "The AI service is temporarily unavailable. Please try again in a few seconds.",
-            status_code=503,
+        items = response.get("Items", [])
+    except ClientError as e:
+        logger.error("Failed to fetch session %s: %s", session_id, str(e))
+        raise AppError("Failed to retrieve session.", status_code=500)
+
+    if not items:
+        raise AppError("Session not found.", status_code=404)
+
+    # Ownership check — every turn stores userId; check the first one
+    if items[0].get("userId") != user.user_id:
+        raise AppError("Insufficient permissions for this action.", status_code=403)
+
+    # Consider only user/assistant conversation turns for the transcript.
+    turns = [item for item in items if item.get("role") in ("user", "assistant")]
+    if not turns:
+        raise AppError("Session has no messages to summarize.", status_code=404)
+
+    transcript = "\n".join(
+        f"{turn.get('role')}: {turn.get('content', '')}" for turn in turns
+    )
+    prompt = (
+        "Summarize the following conversation between a user and the "
+        "Records Assistant. Capture the key questions asked and the main "
+        "information or answers provided, in a few concise sentences.\n\n"
+        f"{transcript}"
+    )
+
+    # Generate first; persist only on success (Req 6.5).
+    summary = BedrockService().invoke_model(prompt, max_tokens=512)
+
+    generated_at = _persist_summary(
+        session_id=session_id,
+        user_id=user.user_id,
+        summary=summary,
+    )
+
+    return ApiResponse(
+        data=ChatSummaryResponse(
+            sessionId=session_id,
+            summary=summary,
+            generatedAt=generated_at,
         )
+    )
 
 
-# ── Persistence ───────────────────────────────────────────────────────────────
+# -- Persistence ---------------------------------------------------------------
+
+
+def _persist_both_turns(
+    session_id: str,
+    user_id: str,
+    question: str,
+    answer: str,
+) -> None:
+    """Write user and assistant turns to CONVERSATION_TABLE. Failures logged only."""
+    now = _utcnow()
+    _persist_turn(
+        session_id=session_id,
+        user_id=user_id,
+        role="user",
+        content=question,
+        intent="agent",
+        timestamp=now,
+    )
+    _persist_turn(
+        session_id=session_id,
+        user_id=user_id,
+        role="assistant",
+        content=answer,
+        intent="agent",
+        timestamp=_utcnow(),
+        source_type="agent",
+    )
+
+
+def _persist_summary(session_id: str, user_id: str, summary: str) -> str:
+    """Write a conversation summary record to CONVERSATION_TABLE.
+
+    The summary is stored as a distinct item sharing the session partition key,
+    marked by ``role = "summary"``. Its sort key uses the reserved prefix
+    ``zzz-summary#`` so it sorts after ordinary ISO-8601 turn timestamps and
+    never interleaves with conversation history.
+
+    Returns
+    -------
+    str
+        The ISO-8601 generation timestamp associated with the summary.
+    """
+    generated_at = _utcnow()
+    _conv_db.put_item(
+        {
+            "sessionId": session_id,
+            "timestamp": f"zzz-summary#{generated_at}",
+            "userId": user_id,
+            "role": "summary",
+            "content": summary,
+            "generatedAt": generated_at,
+        }
+    )
+    return generated_at
 
 
 def _persist_turn(
@@ -499,30 +436,15 @@ def _persist_turn(
     try:
         _conv_db.put_item(item)
     except Exception:
-        logger.exception(
+        logger.error(
             "Failed to persist conversation turn",
             extra={"sessionId": session_id, "role": role},
+            exc_info=True,
         )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _fmt(value: float | int | None) -> str:
-    """Format a numeric amount with commas and 2 decimal places."""
-    if value is None:
-        return "0.00"
-    return f"{float(value):,.2f}"
-
-
-def _po_qualifier(po_number: str | None) -> str:
-    return f" for {po_number}" if po_number else ""
-
-
-def _scope_vendor(params: dict, user_scope: str | None) -> str | None:
-    """Return vendor_name param, or None if not present."""
-    return params.get("vendor_name")

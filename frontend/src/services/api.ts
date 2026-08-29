@@ -134,3 +134,127 @@ export async function sendChatMessage(
   // Backend wraps in { status_code, data: {...} }
   return data.data as ChatResponseData;
 }
+
+/* ── Chat SSE Streaming ───────────────────────────────────── */
+
+export interface SseTokenEvent {
+  type: "token";
+  content: string;
+}
+
+export interface SseDoneEvent {
+  type: "done";
+  sessionId: string;
+  sourceType: string;
+  citations: ChatCitation[];
+  dataSnapshot?: Record<string, unknown> | null;
+}
+
+export interface SseErrorEvent {
+  type: "error";
+  message: string;
+}
+
+export interface SsePingEvent {
+  type: "ping";
+}
+
+export type SseEvent = SseTokenEvent | SseDoneEvent | SseErrorEvent | SsePingEvent;
+
+/**
+ * Stream a chat message from the backend SSE endpoint (`POST /chat/stream`).
+ *
+ * Uses `fetch` (not axios) so the response body can be consumed as a
+ * `ReadableStream`. Yields typed `SseEvent` objects as they arrive. Malformed
+ * data lines are skipped silently. Pass an `AbortSignal` to cancel the stream.
+ *
+ * `sendChatMessage` (axios) remains available for backward compatibility.
+ */
+export async function* streamChatMessage(
+  question: string,
+  sessionId?: string,
+  categoryFilter?: string,
+  signal?: AbortSignal
+): AsyncGenerator<SseEvent> {
+  const body: Record<string, string> = { question };
+  if (sessionId) body.sessionId = sessionId;
+  if (categoryFilter) body.categoryFilter = categoryFilter;
+
+  const response = await fetch(`${BASE_URL}/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`Stream request failed: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() ?? "";
+    for (const block of blocks) {
+      const dataLine = block.split("\n").find((l) => l.startsWith("data: "));
+      if (!dataLine) continue;
+      try {
+        yield JSON.parse(dataLine.slice(6)) as SseEvent;
+      } catch {
+        // skip malformed event
+      }
+    }
+  }
+}
+
+/* ── Chat Session Summary & Resume ────────────────────────── */
+
+export interface ChatSessionSummaryItem {
+  sessionId: string;
+  firstMessage: string;
+  lastActivity: string;
+  messageCount: number;
+  summary?: string;
+  summaryGeneratedAt?: string;
+}
+
+export interface ChatMessageItem {
+  role: string;
+  content: string;
+  timestamp: string;
+  citations?: ChatCitation[] | null;
+  sourceType?: string | null;
+}
+
+export interface ChatSessionDetailData {
+  sessionId: string;
+  messages: ChatMessageItem[];
+}
+
+// POST /chat/sessions/{id}/summary — fire-and-forget on drawer close. Swallows all errors.
+export async function summarizeSession(sessionId: string): Promise<void> {
+  try {
+    await api.post(`/chat/sessions/${sessionId}/summary`);
+  } catch {
+    // fire-and-forget: a failed summary must never surface to the user
+  }
+}
+
+// GET /chat/sessions/{id} — full message history for the expander.
+export async function getSession(sessionId: string): Promise<ChatSessionDetailData> {
+  const { data } = await api.get(`/chat/sessions/${sessionId}`);
+  return data.data as ChatSessionDetailData;
+}
+
+// GET /chat/sessions — returns most recent session including its stored summary, or null.
+export async function getLatestSessionSummary(): Promise<ChatSessionSummaryItem | null> {
+  const { data } = await api.get("/chat/sessions", { params: { limit: 1 } });
+  const sessions = data.data as ChatSessionSummaryItem[];
+  return sessions.length > 0 ? sessions[0] : null;
+}

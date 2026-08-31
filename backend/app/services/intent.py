@@ -1,5 +1,11 @@
 """Intent classification for the Records Assistant.
 
+.. deprecated::
+    This module is no longer used by ``chat.py``. The Strands Agent in
+    ``app/services/agent.py`` replaces keyword-based intent classification
+    with native LLM function-calling. This file is kept for reference and
+    any internal scripts that may still import constants from it.
+
 ``classify()`` is the single public entry point. It returns the intent,
 extracted parameters, and a confidence score.
 

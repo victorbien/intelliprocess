@@ -38,6 +38,7 @@ def start() -> None:
     _seed_purchase_orders()
     _seed_goods_receipts()
     _seed_documents()
+    patch_agent_for_dev()
 
 
 # ── Table / bucket creation ───────────────────────────────────────────────────
@@ -174,7 +175,15 @@ def _create_tables() -> None:
 
 def _create_bucket() -> None:
     s3 = boto3.client("s3", region_name=settings.AWS_REGION)
-    s3.create_bucket(Bucket=settings.DOCUMENT_BUCKET)
+    # S3 requires an explicit LocationConstraint for every region except
+    # us-east-1. Omitting it raises IllegalLocationConstraintException.
+    if settings.AWS_REGION == "us-east-1":
+        s3.create_bucket(Bucket=settings.DOCUMENT_BUCKET)
+    else:
+        s3.create_bucket(
+            Bucket=settings.DOCUMENT_BUCKET,
+            CreateBucketConfiguration={"LocationConstraint": settings.AWS_REGION},
+        )
 
 
 # ── Seed data ─────────────────────────────────────────────────────────────────
@@ -423,3 +432,46 @@ def _seed_documents() -> None:
     ]
     for doc in docs:
         table.put_item(Item=doc)
+
+
+def patch_agent_for_dev() -> None:
+    """Replace AgentService.stream_answer with a canned response for offline dev.
+
+    Strands Agents calls Amazon Bedrock for inference. When running locally
+    without Bedrock credentials, this stub lets the SSE flow work end-to-end
+    by yielding a fixed streaming response.
+    """
+    from app.services import agent as agent_module
+
+    async def _mock_stream_answer(question, session_id, user, category_filter=None):
+        canned = (
+            "This is a mock response from the local development environment. "
+            "Deploy to AWS with Bedrock access to enable the full AI assistant. "
+            f"You asked: {question}"
+        )
+        chunk_size = 24
+        for i in range(0, len(canned), chunk_size):
+            yield {"type": "token", "content": canned[i:i + chunk_size]}
+        yield {
+            "type": "done",
+            "sessionId": session_id,
+            "sourceType": "agent",
+            "citations": [],
+            "dataSnapshot": None,
+        }
+
+    agent_module.AgentService.stream_answer = staticmethod(_mock_stream_answer)
+
+    # Also stub BedrockService.invoke_model so features that call the model
+    # directly (e.g. conversation summarization) work offline. moto does not
+    # implement the Bedrock runtime invoke_model API.
+    from app.services import bedrock as bedrock_module
+
+    def _mock_invoke_model(self, prompt, max_tokens=1024, temperature=0.0):
+        return (
+            "This is a mock summary generated in the local development "
+            "environment. Deploy to AWS with Bedrock access to enable real "
+            "summaries."
+        )
+
+    bedrock_module.BedrockService.invoke_model = _mock_invoke_model

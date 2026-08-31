@@ -1,7 +1,6 @@
 """IntelliProcess AI — FastAPI Application Entry Point."""
 
 import logging
-import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,15 +9,15 @@ from mangum import Mangum
 from app.config import settings
 
 # ── Local dev: activate moto mocks before any boto3 client is created ─────────
-# Before (bug — reads a raw OS environment variable, not the app's config)
-_USE_MOCKS = settings.STAGE == "dev" and os.environ.get("USE_MOCKS", "true").lower() == "true"
-
-# After (fix — reads the value pydantic already loaded from .env)
+# Read the value pydantic already loaded from .env (not a raw OS env var).
 _USE_MOCKS = settings.STAGE == "dev" and settings.USE_MOCKS
+if _USE_MOCKS:
+    from app.dev_mock import start as _start_mocks
+    _start_mocks()
 # ──────────────────────────────────────────────────────────────────────────────
 
-from app.middleware import CorrelationIdMiddleware, register_exception_handlers
-from app.routers import chat, dashboard, documents, invoices
+from app.middleware import CorrelationIdMiddleware, register_exception_handlers  # noqa: E402
+from app.routers import chat, dashboard, documents, invoices  # noqa: E402
 
 # Configure structured logging
 logging.basicConfig(
@@ -38,6 +37,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    # Allow any localhost/127.0.0.1 port in dev so the app works regardless of
+    # which port Vite selects (5173, 5174, ...).
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

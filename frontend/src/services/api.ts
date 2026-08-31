@@ -6,9 +6,7 @@
  * { statusCode, error: { code, message } } (older handlers may return a bare
  * string `error`). `unwrap` and `normalizeError` handle both shapes.
  */
-
 import axios, { AxiosError, type AxiosInstance } from "axios";
-
 import { getToken } from "./auth";
 import { logger } from "./logger";
 import {
@@ -55,10 +53,8 @@ function normalizeError(err: unknown): ApiError {
     const axiosErr = err as AxiosError<{ error?: { code?: string; message?: string } | string }>;
     const status = axiosErr.response?.status ?? 0;
     const body = axiosErr.response?.data;
-
     let message = "Something went wrong. Please try again.";
     let code = "UNKNOWN";
-
     if (body && typeof body === "object" && "error" in body) {
       const e = (body as { error?: { code?: string; message?: string } | string }).error;
       if (typeof e === "string") {
@@ -74,11 +70,9 @@ function normalizeError(err: unknown): ApiError {
       message = "Unable to reach the server. Check your connection and try again.";
       code = "NETWORK_ERROR";
     }
-
     logger.error("api", `${axiosErr.config?.method?.toUpperCase()} ${axiosErr.config?.url} -> ${status} ${code}: ${message}`);
     return new ApiError(message, status, code);
   }
-
   logger.error("api", "Unexpected non-axios error", err);
   return new ApiError("An unexpected error occurred.", 0, "UNKNOWN");
 }
@@ -110,7 +104,6 @@ async function post<T>(url: string, body?: unknown): Promise<T> {
 }
 
 // ─── Presigned S3 upload helper ───────────────────────────────────────────────
-
 function buildFormData(fields: Record<string, string>, file: File): FormData {
   const form = new FormData();
   Object.entries(fields).forEach(([k, v]) => form.append(k, v));
@@ -131,11 +124,9 @@ export async function uploadToS3(presigned: PresignedPost, file: File): Promise<
 }
 
 // ─── Invoices ─────────────────────────────────────────────────────────────────
-
 export const invoicesApi = {
   requestUpload: (fileName: string, contentType: string) =>
     post<InvoiceUploadResponse>("/invoices/upload", { fileName, contentType }),
-
   list: (params?: { status?: string; limit?: number }) => {
     const q = new URLSearchParams();
     if (params?.status) q.set("status", params.status);
@@ -143,9 +134,7 @@ export const invoicesApi = {
     const qs = q.toString();
     return get<PaginatedResponse<InvoiceListItem>>(`/invoices${qs ? `?${qs}` : ""}`);
   },
-
   detail: (id: string) => get<InvoiceDetail>(`/invoices/${id}`),
-
   approve: (id: string, action: "APPROVE" | "REJECT", comment: string) =>
     post<InvoiceApproveResponse>(`/invoices/${id}/approve`, { action, comment }),
 };
@@ -158,20 +147,17 @@ export async function uploadInvoice(file: File): Promise<string> {
 }
 
 // ─── Chat ─────────────────────────────────────────────────────────────────────
-
 export const chatApi = {
   ask: (question: string, sessionId?: string, categoryFilter?: string) =>
     post<ChatResponse>("/chat", { question, sessionId, categoryFilter }),
 };
 
 // ─── Documents ──────────────────────────────────────────────────────────────
-
 export const documentsApi = {
   list: (category?: DocumentCategory) =>
     get<PaginatedResponse<DocumentListItem>>(
       `/documents${category ? `?category=${category}` : ""}`,
     ),
-
   requestUpload: (
     fileName: string,
     contentType: string,
@@ -184,7 +170,6 @@ export const documentsApi = {
       category,
       description,
     }),
-
   sync: () => post<KbSyncResponse>("/documents/sync"),
 };
 
@@ -205,17 +190,14 @@ export async function uploadDocument(
 }
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
-
 export const dashboardApi = {
   stats: () => get<DashboardStats>("/dashboard/stats"),
 };
 
 // ─── Admin ────────────────────────────────────────────────────────────────────
-
 export const adminApi = {
   seedData: (dataSet = "default") =>
     post<SeedDataResponse>("/admin/seed-data", { dataSet }),
-
   uploadPurchaseOrder: (body: {
     poNumber: string;
     vendorName: string;
@@ -223,7 +205,6 @@ export const adminApi = {
     currency?: string;
     department?: string;
   }) => post<PurchaseOrderUploadResponse>("/purchase-orders/upload", body),
-
   uploadGoodsReceipt: (body: {
     grId: string;
     poNumber: string;
@@ -231,3 +212,162 @@ export const adminApi = {
     status?: string;
   }) => post<GoodsReceiptUploadResponse>("/goods-receipts/upload", body),
 };
+
+// ─── Records Assistant (chat) — streaming, citations, session summary ─────────
+//
+// These helpers back the floating Records Assistant widget. They intentionally
+// use the shared `http` axios instance (JWT + error handling) for JSON calls
+// and native `fetch` for the SSE stream (axios cannot expose a ReadableStream).
+// The backend wraps success payloads as { data: ... }, so we read `.data.data`.
+
+/** A single retrieved-source citation attached to an assistant answer. */
+export interface ChatCitation {
+  documentName: string;
+  documentId: string;
+  pageNumber?: number;
+  relevanceScore: number;
+  snippet: string;
+  category?: string;
+}
+
+export interface ChatResponseData {
+  answer: string;
+  citations: ChatCitation[];
+  sessionId: string;
+  sourceType: "structured_query" | "document_search" | "hybrid";
+  dataSnapshot?: Record<string, unknown>;
+  unavailable?: boolean;
+  responseTimeMs: number;
+}
+
+/**
+ * Non-streaming chat call (kept for backward compatibility / fallback).
+ * Prefer `streamChatMessage` for the interactive widget.
+ */
+export async function sendChatMessage(
+  question: string,
+  sessionId?: string,
+): Promise<ChatResponseData> {
+  const body: Record<string, string> = { question };
+  if (sessionId) body.sessionId = sessionId;
+  const { data } = await http.post("/chat", body);
+  return data.data as ChatResponseData;
+}
+
+// ─── Chat SSE Streaming ───────────────────────────────────────────────────────
+export interface SseTokenEvent {
+  type: "token";
+  content: string;
+}
+export interface SseDoneEvent {
+  type: "done";
+  sessionId: string;
+  sourceType: string;
+  citations: ChatCitation[];
+  dataSnapshot?: Record<string, unknown> | null;
+}
+export interface SseErrorEvent {
+  type: "error";
+  message: string;
+}
+export interface SsePingEvent {
+  type: "ping";
+}
+export type SseEvent = SseTokenEvent | SseDoneEvent | SseErrorEvent | SsePingEvent;
+
+/**
+ * Stream a chat message from the backend SSE endpoint (`POST /chat/stream`).
+ *
+ * Uses `fetch` (not axios) so the response body can be consumed as a
+ * `ReadableStream`. Yields typed `SseEvent` objects as they arrive. Malformed
+ * data lines are skipped silently. Pass an `AbortSignal` to cancel the stream.
+ *
+ * Attaches the bearer token (when present) so the stream authenticates the same
+ * way as the shared `http` client.
+ */
+export async function* streamChatMessage(
+  question: string,
+  sessionId?: string,
+  categoryFilter?: string,
+  signal?: AbortSignal,
+): AsyncGenerator<SseEvent> {
+  const body: Record<string, string> = { question };
+  if (sessionId) body.sessionId = sessionId;
+  if (categoryFilter) body.categoryFilter = categoryFilter;
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = await getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const response = await fetch(`${BASE_URL}/chat/stream`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Stream request failed: ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() ?? "";
+    for (const block of blocks) {
+      const dataLine = block.split("\n").find((l) => l.startsWith("data: "));
+      if (!dataLine) continue;
+      try {
+        yield JSON.parse(dataLine.slice(6)) as SseEvent;
+      } catch {
+        // skip malformed event
+      }
+    }
+  }
+}
+
+// ─── Chat Session Summary & Resume ────────────────────────────────────────────
+export interface ChatSessionSummaryItem {
+  sessionId: string;
+  firstMessage: string;
+  lastActivity: string;
+  messageCount: number;
+  summary?: string;
+  summaryGeneratedAt?: string;
+}
+export interface ChatMessageItem {
+  role: string;
+  content: string;
+  timestamp: string;
+  citations?: ChatCitation[] | null;
+  sourceType?: string | null;
+}
+export interface ChatSessionDetailData {
+  sessionId: string;
+  messages: ChatMessageItem[];
+}
+
+// POST /chat/sessions/{id}/summary — fire-and-forget on drawer close. Swallows all errors.
+export async function summarizeSession(sessionId: string): Promise<void> {
+  try {
+    await http.post(`/chat/sessions/${sessionId}/summary`);
+  } catch {
+    // fire-and-forget: a failed summary must never surface to the user
+  }
+}
+
+// GET /chat/sessions/{id} — full message history for the expander.
+export async function getSession(sessionId: string): Promise<ChatSessionDetailData> {
+  const { data } = await http.get(`/chat/sessions/${sessionId}`);
+  return data.data as ChatSessionDetailData;
+}
+
+// GET /chat/sessions — returns most recent session including its stored summary, or null.
+export async function getLatestSessionSummary(): Promise<ChatSessionSummaryItem | null> {
+  const { data } = await http.get("/chat/sessions", { params: { limit: 1 } });
+  const sessions = data.data as ChatSessionSummaryItem[];
+  return sessions.length > 0 ? sessions[0] : null;
+}

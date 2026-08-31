@@ -15,10 +15,15 @@ class Settings(BaseSettings):
     USE_MOCKS: bool = True
 
     # AWS
-    AWS_REGION: str = "us-east-1"
+    AWS_REGION: str = "ap-southeast-2"
 
     # S3
     DOCUMENT_BUCKET: str = "intelliprocess-ai-documents"
+    S3_VECTORS_INDEX: str = ""
+
+    # Strands Agent
+    STRANDS_MAX_TOKENS: int = 4096
+    STRANDS_TEMPERATURE: float = 0.0
 
     # DynamoDB Tables
     INVOICE_TABLE: str = ""

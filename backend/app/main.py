@@ -9,13 +9,13 @@ from mangum import Mangum
 
 from app.config import settings
 
-# -- Local dev: activate moto mocks before any boto3 client is created ---------
+# ── Local dev: activate moto mocks before any boto3 client is created ─────────
 # Read the value pydantic already loaded from .env (not a raw OS env var).
 _USE_MOCKS = settings.STAGE == "dev" and settings.USE_MOCKS
 if _USE_MOCKS:
     from app.dev_mock import start as _start_mocks
     _start_mocks()
-# ------------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
 
 from app.middleware import CorrelationIdMiddleware, register_exception_handlers
 from app.routers import chat, dashboard, documents, invoices
@@ -34,7 +34,7 @@ app = FastAPI(
     redoc_url=None,
 )
 
-# Middleware (order matters -- outermost first)
+# Middleware (order matters — outermost first)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:3000"],
@@ -67,7 +67,7 @@ app.include_router(
 
 @app.get("/health", tags=["system"])
 def health_check():
-    """Health check endpoint -- unauthenticated."""
+    """Health check endpoint — unauthenticated."""
     return {"status": "healthy", "stage": settings.STAGE}
 
 

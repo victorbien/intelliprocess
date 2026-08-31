@@ -99,7 +99,7 @@ export default function ChatWindow({ open }: ChatWindowProps) {
 
   // Scroll to bottom whenever messages change
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
   }, [messages, loading]);
 
   // Fetch the latest session summary to offer a resume prompt. Extracted so it

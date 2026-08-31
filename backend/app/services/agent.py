@@ -13,14 +13,14 @@ from strands.models.bedrock import BedrockModel
 from app.config import settings
 from app.services.bedrock import BedrockService
 from app.services.tools import (
-    query_invoices,
     count_invoices_by_status,
     get_invoice_detail,
-    query_purchase_orders,
     query_goods_receipts,
-    top_suppliers,
-    supplier_order_accuracy,
+    query_invoices,
+    query_purchase_orders,
     supplier_lowest_prices,
+    supplier_order_accuracy,
+    top_suppliers,
 )
 
 logger = logging.getLogger(__name__)

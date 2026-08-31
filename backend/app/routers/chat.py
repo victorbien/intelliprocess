@@ -18,25 +18,25 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Path, Query
-from fastapi.responses import StreamingResponse
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from fastapi import APIRouter, Depends, Path, Query
+from fastapi.responses import StreamingResponse
 
 from app.config import settings
 from app.middleware import AppError, CurrentUser, get_current_user
 from app.models.schemas import (
     ApiResponse,
+    ChatMessage,
     ChatRequest,
     ChatResponse,
     ChatSessionDetail,
     ChatSessionSummary,
     ChatSummaryResponse,
-    ChatMessage,
 )
-from app.services.dynamo import DynamoClient
 from app.services.agent import AgentService
 from app.services.bedrock import BedrockService
+from app.services.dynamo import DynamoClient
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

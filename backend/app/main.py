@@ -1,7 +1,6 @@
 """IntelliProcess AI — FastAPI Application Entry Point."""
 
 import logging
-import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,8 +16,8 @@ if _USE_MOCKS:
     _start_mocks()
 # ──────────────────────────────────────────────────────────────────────────────
 
-from app.middleware import CorrelationIdMiddleware, register_exception_handlers
-from app.routers import chat, dashboard, documents, invoices
+from app.middleware import CorrelationIdMiddleware, register_exception_handlers  # noqa: E402
+from app.routers import chat, dashboard, documents, invoices  # noqa: E402
 
 # Configure structured logging
 logging.basicConfig(

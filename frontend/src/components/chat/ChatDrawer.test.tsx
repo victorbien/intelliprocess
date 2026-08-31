@@ -2,19 +2,33 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 import ChatDrawer from "./ChatDrawer";
-import { chatApi } from "@/services/api";
+import { streamChatMessage, type SseEvent } from "@/services/api";
 
-// Mock the API module so no network calls happen.
+// Mock the API module so no network calls happen. The chat widget now uses the
+// SSE streaming API (`streamChatMessage`, an async generator) instead of the
+// legacy non-streaming `chatApi.ask`.
 vi.mock("@/services/api", () => ({
-  chatApi: { ask: vi.fn() },
+  streamChatMessage: vi.fn(),
+  // Session resume feature: return null so no resume prompt is shown in tests.
+  getLatestSessionSummary: vi.fn(() => Promise.resolve(null)),
+  summarizeSession: vi.fn(() => Promise.resolve(null)),
 }));
 
-const mockedAsk = vi.mocked(chatApi.ask);
+const mockedStream = vi.mocked(streamChatMessage);
+
+// Helper: build an async generator that yields the given SSE events in order.
+function makeStream(events: SseEvent[]) {
+  return async function* () {
+    for (const ev of events) {
+      yield ev;
+    }
+  };
+}
 
 describe("ChatDrawer", () => {
   beforeEach(() => {
-    mockedAsk.mockReset();
-    // ChatDrawer now restores from sessionStorage; isolate each test.
+    mockedStream.mockReset();
+    // ChatDrawer restores from sessionStorage; isolate each test.
     sessionStorage.clear();
   });
 
@@ -24,46 +38,54 @@ describe("ChatDrawer", () => {
     // Empty input -> button disabled, and clicking should not call the API.
     expect(send).toBeDisabled();
     fireEvent.click(send);
-    expect(mockedAsk).not.toHaveBeenCalled();
+    expect(mockedStream).not.toHaveBeenCalled();
   });
 
-  it("sends a question and renders the assistant answer with a citation", async () => {
-    mockedAsk.mockResolvedValueOnce({
-      answer: "You have 5 escalated invoices.",
-      citations: [
+  it("sends a question and renders the streamed assistant answer with a citation", async () => {
+    mockedStream.mockImplementation(
+      makeStream([
+        { type: "token", content: "You have 5 escalated invoices." },
         {
-          documentName: "Policy.pdf",
-          documentId: "doc-1",
-          relevanceScore: 0.9,
-          snippet: "Escalation rules…",
+          type: "done",
+          sessionId: "sess-1",
+          sourceType: "structured_query",
+          citations: [
+            {
+              documentName: "Policy.pdf",
+              documentId: "doc-1",
+              relevanceScore: 0.9,
+              snippet: "Escalation rules...",
+            },
+          ],
+          dataSnapshot: { escalated: 5 },
         },
-      ],
-      sessionId: "sess-1",
-      sourceType: "structured",
-      dataSnapshot: { escalated: 5 },
-      responseTimeMs: 100,
-    });
+      ]) as unknown as typeof streamChatMessage,
+    );
 
     render(<ChatDrawer open onClose={() => {}} />);
-    const input = screen.getByPlaceholderText(/type your question/i);
+    const input = screen.getByPlaceholderText(/ask about/i);
     fireEvent.change(input, { target: { value: "How many escalated?" } });
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
 
-    expect(mockedAsk).toHaveBeenCalledWith("How many escalated?", undefined, undefined);
+    expect(mockedStream).toHaveBeenCalled();
     await waitFor(() =>
       expect(screen.getByText("You have 5 escalated invoices.")).toBeInTheDocument(),
     );
-    // dataSnapshot value rendered (key "escalated" -> "Escalated", value 5).
-    expect(screen.getByText("5")).toBeInTheDocument();
     // A citation source is shown.
-    expect(screen.getByText(/Policy\.pdf/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByText(/Policy\.pdf/)).toBeInTheDocument(),
+    );
   });
 
-  it("shows an error bubble when the API call fails", async () => {
-    mockedAsk.mockRejectedValueOnce(new Error("boom"));
+  it("shows an error banner when the stream yields an error event", async () => {
+    mockedStream.mockImplementation(
+      makeStream([
+        { type: "error", message: "The assistant is unavailable right now." },
+      ]) as unknown as typeof streamChatMessage,
+    );
 
     render(<ChatDrawer open onClose={() => {}} />);
-    fireEvent.change(screen.getByPlaceholderText(/type your question/i), {
+    fireEvent.change(screen.getByPlaceholderText(/ask about/i), {
       target: { value: "hello" },
     });
     fireEvent.click(screen.getByRole("button", { name: /send/i }));

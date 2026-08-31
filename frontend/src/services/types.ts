@@ -155,12 +155,32 @@ export interface RecentActivityItem {
   actor: string;
 }
 
+export interface SupplierBreakdownItem {
+  vendorName: string;
+  invoiceCount: number;
+  totalAmount: number;
+}
+
+export interface AmountBucket {
+  bucket: string;
+  count: number;
+}
+
+export interface MatchRateSummary {
+  matched: number;
+  total: number;
+  rate: number;
+}
+
 export interface DashboardStats {
   totalInvoices: number;
   statusCounts: Record<string, number>;
   autoApprovalRate: number;
   avgProcessingTimeSec: number;
   recentActivity: RecentActivityItem[];
+  supplierBreakdown: SupplierBreakdownItem[];
+  amountDistribution: AmountBucket[];
+  matchRate?: MatchRateSummary | null;
 }
 
 // ─── Admin ────────────────────────────────────────────────────────────────

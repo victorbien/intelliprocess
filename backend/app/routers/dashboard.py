@@ -51,9 +51,12 @@ _po_db = DynamoClient(settings.PO_TABLE)
 _gr_db = DynamoClient(settings.GR_TABLE)
 
 # Attributes needed to compute dashboard statistics (keeps the scan lean).
+# ``extraction`` and ``matchResult`` are nested maps projected by their
+# top-level attribute name so compute_stats can aggregate by supplier,
+# amount, and three-way match outcome.
 _STATS_PROJECTION = (
     "documentId, fileName, #s, uploadedAt, updatedAt, "
-    "approvalDecision, processingDurationMs"
+    "approvalDecision, processingDurationMs, extraction, matchResult"
 )
 _STATS_ATTR_NAMES = {"#s": "status"}
 

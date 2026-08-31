@@ -329,6 +329,35 @@ class RecentActivityItem(BaseModel):
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
 
 
+class SupplierBreakdownItem(BaseModel):
+    """A single supplier entry in the dashboard supplier breakdown chart."""
+
+    vendor_name: str = Field(..., alias="vendorName")
+    invoice_count: int = Field(..., alias="invoiceCount")
+    total_amount: float = Field(..., alias="totalAmount")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class AmountBucket(BaseModel):
+    """A single bucket in the invoice amount-distribution chart."""
+
+    bucket: str
+    count: int
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class MatchRateSummary(BaseModel):
+    """Three-way match pass rate summary for the dashboard."""
+
+    matched: int
+    total: int
+    rate: float
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
 class DashboardStatsResponse(BaseModel):
     """Response body for GET /dashboard/stats.
 
@@ -342,6 +371,13 @@ class DashboardStatsResponse(BaseModel):
     recent_activity: list[RecentActivityItem] = Field(
         default_factory=list, alias="recentActivity"
     )
+    supplier_breakdown: list[SupplierBreakdownItem] = Field(
+        default_factory=list, alias="supplierBreakdown"
+    )
+    amount_distribution: list[AmountBucket] = Field(
+        default_factory=list, alias="amountDistribution"
+    )
+    match_rate: MatchRateSummary | None = Field(None, alias="matchRate")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
 

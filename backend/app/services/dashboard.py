@@ -24,6 +24,21 @@ _AUTO_APPROVED_APPROVER = "SYSTEM"
 # Maximum number of recent-activity rows returned on the dashboard.
 _RECENT_ACTIVITY_LIMIT = 10
 
+# Maximum number of suppliers returned in the supplier breakdown chart.
+_SUPPLIER_BREAKDOWN_LIMIT = 5
+
+# Fixed amount-distribution buckets, in display order. Each tuple is
+# (label, lower_inclusive, upper_exclusive). ``None`` upper bound = open-ended.
+_AMOUNT_BUCKETS: list[tuple[str, float, float | None]] = [
+    ("< $1k", 0.0, 1000.0),
+    ("$1k–5k", 1000.0, 5000.0),
+    ("$5k–10k", 5000.0, 10000.0),
+    ("> $10k", 10000.0, None),
+]
+
+# matchResult.threeWayMatch value that counts as a successful match.
+_MATCH_PASS = "PASS"
+
 
 def compute_stats(invoice_items: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate invoice records into dashboard statistics.
@@ -86,6 +101,12 @@ def compute_stats(invoice_items: list[dict[str, Any]]) -> dict[str, Any]:
 
     recent_activity = _build_recent_activity(invoice_items)
 
+    # Chart aggregations (feature/dashboard-charts) — all derived from the same
+    # scan, defending against missing/malformed extraction and matchResult blocks.
+    supplier_breakdown = _build_supplier_breakdown(invoice_items)
+    amount_distribution = _build_amount_distribution(invoice_items)
+    match_rate = _build_match_rate(invoice_items)
+
     logger.info(
         "Dashboard stats computed",
         extra={
@@ -101,6 +122,9 @@ def compute_stats(invoice_items: list[dict[str, Any]]) -> dict[str, Any]:
         "autoApprovalRate": auto_approval_rate,
         "avgProcessingTimeSec": avg_processing_time_sec,
         "recentActivity": recent_activity,
+        "supplierBreakdown": supplier_breakdown,
+        "amountDistribution": amount_distribution,
+        "matchRate": match_rate,
     }
 
 
@@ -263,6 +287,100 @@ def default_seed_data() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     ]
 
     return purchase_orders, goods_receipts
+
+
+# ── Chart aggregations (feature/dashboard-charts) ───────────────────────────────
+
+
+def _build_supplier_breakdown(
+    invoice_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Top suppliers by total invoiced amount (top ``_SUPPLIER_BREAKDOWN_LIMIT``).
+
+    Aggregates invoice count and summed amount per vendor from the extraction
+    block. Invoices with no extraction block or no vendor name are skipped.
+    Returns an empty list when there is no usable data.
+    """
+    totals: dict[str, dict[str, Any]] = {}
+
+    for item in invoice_items:
+        extraction = item.get("extraction") or {}
+        if not isinstance(extraction, dict):
+            continue
+
+        vendor_name = extraction.get("vendorName")
+        if not vendor_name or not str(vendor_name).strip():
+            continue
+        vendor_name = str(vendor_name).strip()
+
+        amount = _to_float(extraction.get("totalAmount")) or 0.0
+
+        entry = totals.setdefault(
+            vendor_name,
+            {"vendorName": vendor_name, "invoiceCount": 0, "totalAmount": 0.0},
+        )
+        entry["invoiceCount"] += 1
+        entry["totalAmount"] += amount
+
+    ranked = sorted(
+        totals.values(), key=lambda e: e["totalAmount"], reverse=True
+    )
+    # Round summed amounts to cents for a stable response shape.
+    for entry in ranked:
+        entry["totalAmount"] = round(entry["totalAmount"], 2)
+
+    return ranked[:_SUPPLIER_BREAKDOWN_LIMIT]
+
+
+def _build_amount_distribution(
+    invoice_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Count invoices per fixed amount bucket.
+
+    Always returns all buckets (zero count when empty). Invoices without a
+    usable ``extraction.totalAmount`` are skipped.
+    """
+    counts = {label: 0 for label, _, _ in _AMOUNT_BUCKETS}
+
+    for item in invoice_items:
+        extraction = item.get("extraction") or {}
+        if not isinstance(extraction, dict):
+            continue
+
+        amount = _to_float(extraction.get("totalAmount"))
+        if amount is None:
+            continue
+
+        for label, lower, upper in _AMOUNT_BUCKETS:
+            if amount >= lower and (upper is None or amount < upper):
+                counts[label] += 1
+                break
+
+    return [{"bucket": label, "count": counts[label]} for label, _, _ in _AMOUNT_BUCKETS]
+
+
+def _build_match_rate(invoice_items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Three-way match pass rate over invoices that carry a matchResult block.
+
+    ``total`` counts invoices with a matchResult block; ``matched`` counts those
+    whose ``threeWayMatch`` is ``PASS``. ``rate`` is a percentage (1 dp), 0.0
+    when there is nothing to match.
+    """
+    total = 0
+    matched = 0
+
+    for item in invoice_items:
+        match_result = item.get("matchResult")
+        if not isinstance(match_result, dict):
+            continue
+
+        total += 1
+        outcome = str(match_result.get("threeWayMatch") or "").upper()
+        if outcome == _MATCH_PASS:
+            matched += 1
+
+    rate = round((matched / total) * 100, 1) if total else 0.0
+    return {"matched": matched, "total": total, "rate": rate}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

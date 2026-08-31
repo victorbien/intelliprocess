@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 
 import StatsCards from "@/components/dashboard/StatsCards";
+import StatusDonutChart from "@/components/dashboard/StatusDonutChart";
+import AutoApprovalGauge from "@/components/dashboard/AutoApprovalGauge";
+import SupplierBarChart from "@/components/dashboard/SupplierBarChart";
+import AmountDistributionChart from "@/components/dashboard/AmountDistributionChart";
 import ProcessingSummary from "@/components/dashboard/ProcessingSummary";
 import Spinner from "@/components/common/Spinner";
 import ErrorAlert from "@/components/common/ErrorAlert";
@@ -59,7 +63,15 @@ export default function DashboardPage() {
       ) : stats ? (
         <>
           <StatsCards stats={stats} />
-          <ProcessingSummary activity={stats.recentActivity} />
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <StatusDonutChart statusCounts={stats.statusCounts ?? {}} />
+            <AutoApprovalGauge rate={stats.autoApprovalRate} matchRate={stats.matchRate} />
+            <SupplierBarChart suppliers={stats.supplierBreakdown ?? []} />
+            <AmountDistributionChart buckets={stats.amountDistribution ?? []} />
+          </div>
+
+          <ProcessingSummary activity={stats.recentActivity ?? []} />
         </>
       ) : null}
     </div>

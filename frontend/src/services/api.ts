@@ -17,6 +17,7 @@ import {
   type DocumentCategory,
   type DocumentListItem,
   type DocumentUploadResponse,
+  type ApprovalSettings,
   type GoodsReceiptUploadResponse,
   type InvoiceApproveResponse,
   type InvoiceDetail,
@@ -97,6 +98,15 @@ async function get<T>(url: string): Promise<T> {
 async function post<T>(url: string, body?: unknown): Promise<T> {
   try {
     const res = await http.post<ApiSuccess<T>>(url, body ?? {});
+    return unwrap<T>(res.data);
+  } catch (err) {
+    throw normalizeError(err);
+  }
+}
+
+async function put<T>(url: string, body?: unknown): Promise<T> {
+  try {
+    const res = await http.put<ApiSuccess<T>>(url, body ?? {});
     return unwrap<T>(res.data);
   } catch (err) {
     throw normalizeError(err);
@@ -211,6 +221,9 @@ export const adminApi = {
     totalQuantityReceived: number;
     status?: string;
   }) => post<GoodsReceiptUploadResponse>("/goods-receipts/upload", body),
+  getSettings: () => get<ApprovalSettings>("/admin/settings"),
+  updateSettings: (body: ApprovalSettings) =>
+    put<ApprovalSettings>("/admin/settings", body),
 };
 
 // ─── Records Assistant (chat) — streaming, citations, session summary ─────────

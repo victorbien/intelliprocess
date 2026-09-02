@@ -2,6 +2,7 @@
  * Admin page (task 5.6, AC-5.1.x, FR-CROSS-001).
  *
  * ADMIN-only actions:
+ *  - View and edit approval settings (amount/confidence thresholds, PO/GR match tolerances)
  *  - Upload a Knowledge Base document
  *  - Trigger a KB sync
  *  - Seed sample PO/GR data
@@ -9,11 +10,11 @@
  *  - Upload a structured Goods Receipt
  */
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import DocumentUpload from "@/components/admin/DocumentUpload";
 import { adminApi, documentsApi } from "@/services/api";
-import { ApiError } from "@/services/types";
+import { ApiError, type ApprovalSettings } from "@/services/types";
 import { logger } from "@/services/logger";
 
 type Feedback = { tone: "ok" | "err"; text: string } | null;
@@ -135,6 +136,76 @@ export default function AdminPage() {
     }
   };
 
+  // ── Approval settings (thresholds & tolerances) ──────────────────────────────
+  const [settings, setSettings] = useState<ApprovalSettings | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsMsg, setSettingsMsg] = useState<Feedback>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await adminApi.getSettings();
+        if (active) setSettings(res);
+      } catch (err) {
+        if (active)
+          setSettingsMsg({
+            tone: "err",
+            text: err instanceof ApiError ? err.message : "Failed to load settings.",
+          });
+      } finally {
+        if (active) setSettingsLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const submitSettings = async () => {
+    if (!settings) return;
+    const { amountThreshold, confidenceThreshold, poAmountTolerance, grQtyTolerance } = settings;
+    // Client-side range checks mirror the backend schema (ge/le).
+    if (!Number.isFinite(amountThreshold) || amountThreshold < 0) {
+      setSettingsMsg({ tone: "err", text: "Amount threshold must be 0 or greater." });
+      return;
+    }
+    for (const [label, v] of [
+      ["Confidence threshold", confidenceThreshold],
+      ["PO amount tolerance", poAmountTolerance],
+      ["GR quantity tolerance", grQtyTolerance],
+    ] as const) {
+      if (!Number.isFinite(v) || v < 0 || v > 1) {
+        setSettingsMsg({ tone: "err", text: `${label} must be between 0 and 1.` });
+        return;
+      }
+    }
+    setSettingsBusy(true);
+    setSettingsMsg(null);
+    try {
+      const saved = await adminApi.updateSettings({
+        amountThreshold,
+        confidenceThreshold,
+        poAmountTolerance,
+        grQtyTolerance,
+      });
+      setSettings(saved);
+      logger.info("admin", "Approval settings updated");
+      setSettingsMsg({ tone: "ok", text: "Approval settings saved." });
+    } catch (err) {
+      setSettingsMsg({
+        tone: "err",
+        text: err instanceof ApiError ? err.message : "Failed to save settings.",
+      });
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const setSettingField = (field: keyof ApprovalSettings, value: string) =>
+    setSettings((prev) => (prev ? { ...prev, [field]: value === "" ? NaN : Number(value) } : prev));
+
   const inputCls =
     "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none";
   const btnCls =
@@ -144,10 +215,83 @@ export default function AdminPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold text-slate-800">Admin</h1>
-        <p className="text-sm text-slate-500">Manage Knowledge Base documents and sample matching data.</p>
+        <p className="text-sm text-slate-500">
+          Configure approval settings, and manage Knowledge Base documents and sample matching data.
+        </p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card
+          title="Approval settings"
+          description="Thresholds and three-way match margins used to auto-approve or escalate invoices."
+        >
+          {settingsLoading ? (
+            <p className="text-sm text-slate-400">Loading…</p>
+          ) : settings ? (
+            <div className="space-y-2">
+              <label className="block">
+                <span className="text-xs font-medium text-slate-600">Amount auto-approval threshold (USD)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  className={inputCls}
+                  value={Number.isNaN(settings.amountThreshold) ? "" : settings.amountThreshold}
+                  onChange={(e) => setSettingField("amountThreshold", e.target.value)}
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium text-slate-600">
+                  Confidence threshold (0–1, e.g. 0.85 = 85%)
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  className={inputCls}
+                  value={Number.isNaN(settings.confidenceThreshold) ? "" : settings.confidenceThreshold}
+                  onChange={(e) => setSettingField("confidenceThreshold", e.target.value)}
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium text-slate-600">
+                  PO amount tolerance (0–1, 0 = exact, 0.02 = ±2%)
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  className={inputCls}
+                  value={Number.isNaN(settings.poAmountTolerance) ? "" : settings.poAmountTolerance}
+                  onChange={(e) => setSettingField("poAmountTolerance", e.target.value)}
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium text-slate-600">
+                  GR quantity tolerance (0–1, 0 = exact, 0.02 = ±2%)
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  className={inputCls}
+                  value={Number.isNaN(settings.grQtyTolerance) ? "" : settings.grQtyTolerance}
+                  onChange={(e) => setSettingField("grQtyTolerance", e.target.value)}
+                />
+              </label>
+              <button type="button" disabled={settingsBusy} onClick={() => void submitSettings()} className={btnCls}>
+                {settingsBusy ? "Saving…" : "Save approval settings"}
+              </button>
+              <FeedbackLine feedback={settingsMsg} />
+            </div>
+          ) : (
+            <FeedbackLine feedback={settingsMsg} />
+          )}
+        </Card>
+
         <Card title="Upload document" description="Add a policy, contract, or record to the Knowledge Base.">
           <DocumentUpload />
         </Card>

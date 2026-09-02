@@ -207,6 +207,14 @@ export interface GoodsReceiptUploadResponse {
   message: string;
 }
 
+/** Admin-configurable approval/matching thresholds (GET/PUT /admin/settings). */
+export interface ApprovalSettings {
+  amountThreshold: number;
+  confidenceThreshold: number;
+  poAmountTolerance: number;
+  grQtyTolerance: number;
+}
+
 // ─── Client-side error ──────────────────────────────────────────────────────
 
 /** Normalized error surfaced to UI components. */

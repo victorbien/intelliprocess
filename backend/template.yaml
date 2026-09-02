@@ -25,6 +25,12 @@ Parameters:
     Default: DRAFT
     Description: Bedrock Guardrail Version to invoke
 
+Conditions:
+  # True once a real Knowledge Base ID is supplied (not the NOT_SET sentinel).
+  # When false, KB IAM policies fall back to a wildcard ARN so the stack passes
+  # CloudFormation early validation (ResourceExistenceCheck) before a KB exists.
+  HasKnowledgeBase: !Not [!Equals [!Ref KnowledgeBaseId, "NOT_SET"]]
+
 Globals:
   Function:
     Runtime: python3.12
@@ -37,7 +43,10 @@ Globals:
     Environment:
       Variables:
         STAGE: !Ref Stage
-        DOCUMENT_BUCKET: !Ref DocumentBucket
+        # Real AWS integrations in the deployed stack (BDA extraction, etc.).
+        # Overrides the config.py default of True; local dev still uses .env.
+        USE_MOCKS: "false"
+        DOCUMENT_BUCKET: "intelliprocess-ai-documents"
         INVOICE_TABLE: !Ref InvoicesTable
         PO_TABLE: !Ref PurchaseOrdersTable
         GR_TABLE: !Ref GoodsReceiptsTable
@@ -63,12 +72,13 @@ Resources:
       AutoVerifiedAttributes:
         - email
       MfaConfiguration: 'OFF'
-      PasswordPolicy:
-        MinimumLength: 8
-        RequireUppercase: true
-        RequireLowercase: true
-        RequireNumbers: true
-        RequireSymbols: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
       Schema:
         - Name: name
           AttributeDataType: String
@@ -125,9 +135,10 @@ Resources:
   # =========================================================================
   DocumentBucket:
     Type: AWS::S3::Bucket
-    DependsOn: DocumentBucketPermissionToProcessor
+    DependsOn:
+      - DocumentBucketPermissionToProcessor
     Properties:
-      BucketName: !Sub "intelliprocess-ai-documents"
+      BucketName: "intelliprocess-ai-documents"
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -136,7 +147,7 @@ Resources:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES-256
+              SSEAlgorithm: AES256
       CorsConfiguration:
         CorsRules:
           - AllowedHeaders:
@@ -149,7 +160,7 @@ Resources:
             AllowedOrigins:
               - "http://localhost:*"
               - "https://*.cloudfront.net"
-            ExposeHeaders:
+            ExposedHeaders:
               - "ETag"
             MaxAge: 3600
       NotificationConfiguration:
@@ -162,35 +173,17 @@ Resources:
                     Value: invoices/
             Function: !GetAtt InvoiceProcessorFunction.Arn
 
-  # S3 Bucket Policy to block non-HTTPS traffic and restrict access
-  DocumentBucketPolicy:
-    Type: AWS::S3::BucketPolicy
-    Properties:
-      Bucket: !Ref DocumentBucket
-      BucketPolicyStatement:
-        Version: '2012-10-17'
-        Statement:
-          - Sid: EnforceSSLOnly
-            Effect: Deny
-            Principal: "*"
-            Action: "s3:*"
-            Resource:
-              - !Sub "arn:aws:s3:::intelliprocess-ai-documents"
-              - !Sub "aarn:aws:s3:::intelliprocess-ai-documents/*"
-            Condition:
-              Bool:
-                "aws:SecureTransport": "false"
 
   # =========================================================================
   # 3. DATABASE (DYNAMODB TABLES)
   # =========================================================================
   InvoicesTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub "IntelliProcess-Invoices-${Stage}"
       BillingMode: PAY_PER_REQUEST
-      SSESpecification:
-        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: documentId
           AttributeType: S
@@ -223,11 +216,11 @@ Resources:
 
   PurchaseOrdersTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub "IntelliProcess-PurchaseOrders-${Stage}"
       BillingMode: PAY_PER_REQUEST
-      SSESpecification:
-        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: poNumber
           AttributeType: S
@@ -250,11 +243,11 @@ Resources:
 
   GoodsReceiptsTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub "IntelliProcess-GoodsReceipts-${Stage}"
       BillingMode: PAY_PER_REQUEST
-      SSESpecification:
-        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: grId
           AttributeType: S
@@ -277,11 +270,11 @@ Resources:
 
   ConversationsTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub "IntelliProcess-Conversations-${Stage}"
       BillingMode: PAY_PER_REQUEST
-      SSESpecification:
-        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: sessionId
           AttributeType: S
@@ -302,18 +295,15 @@ Resources:
             - AttributeName: timestamp
               KeyType: RANGE
           Projection:
-            ProjectionType: ALL
-      TimeToLiveSpecification:
-        AttributeName: ttl
-        Enabled: true
+            ProjectionType: KEYS_ONLY
 
   DocumentsTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub "IntelliProcess-Documents-${Stage}"
       BillingMode: PAY_PER_REQUEST
-      SSESpecification:
-        SSEEnabled: true
       AttributeDefinitions:
         - AttributeName: documentId
           AttributeType: S
@@ -346,7 +336,10 @@ Resources:
       CompatibleRuntimes:
         - python3.12
     Metadata:
-      BuildMethod: python3.12
+      # makefile build: installs requirements.txt AND copies the `app` package
+      # into the layer (see shared/Makefile: build-SharedLayer). The built-in
+      # python3.12 builder only installs deps and drops the app source.
+      BuildMethod: makefile
 
   # =========================================================================
   # 5. API GATEWAY (REST API) WITH COGNITO AUTHORIZATION
@@ -356,7 +349,7 @@ Resources:
     Properties:
       Name: !Sub "IntelliProcess-API-${Stage}"
       StageName: !Ref Stage
-      EndpointConfiguration: Regional
+      EndpointConfiguration: REGIONAL
       Cors:
         AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
         AllowHeaders: "'Content-Type,Authorization,X-Correlation-Id'"
@@ -364,13 +357,23 @@ Resources:
         MaxAge: "'86400'"
       Auth:
         DefaultAuthorizer: CognitoAuthorizer
+        # CORS preflight (OPTIONS) requests carry no Authorization header, so the
+        # default Cognito authorizer must NOT be applied to them — otherwise the
+        # browser preflight gets 401 and the real request is blocked (surfaces in
+        # the UI as "Unable to reach the server").
+        AddDefaultAuthorizerToCorsPreflight: false
         Authorizers:
           CognitoAuthorizer:
             UserPoolArn: !GetAtt CognitoUserPool.Arn
             IdentitySource: 'method.request.header.Authorization'
       MethodSettings:
-        - LoggingLevel: INFO
-          MetricsEnabled: true
+        # NOTE: LoggingLevel is intentionally omitted. Method-level execution
+        # logging requires an account-level API Gateway CloudWatch Logs role
+        # (apigateway:UpdateAccount with a cloudwatchRoleArn), which is not
+        # configured on this account. Enabling it here causes stage creation to
+        # fail with a generic "Internal error occurred". Metrics and throttling
+        # do not require that role.
+        - MetricsEnabled: true
           ResourcePath: '/*'
           HttpMethod: '*'
           # Configure global API Throttling (FR-CROSS-003: 100 requests/minute per user)
@@ -387,7 +390,7 @@ Resources:
     Properties:
       FunctionName: !Sub "intelliprocess-upload-${Stage}"
       CodeUri: functions/upload_handler/
-      Handler: app.lambda_handler
+      Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 30
       Layers:
@@ -413,7 +416,7 @@ Resources:
                 - s3:PutObject
                 - s3:GetObject
               Resource:
-                - !Sub "arn:aws:s3:::${DocumentBucket}/*"
+                - "arn:aws:s3:::intelliprocess-ai-documents/*"
             - Sid: DynamoDBPutPermissions
               Effect: Allow
               Action:
@@ -428,7 +431,7 @@ Resources:
     Properties:
       FunctionName: !Sub "intelliprocess-processor-${Stage}"
       CodeUri: functions/invoice_processor/
-      Handler: app.lambda_handler
+      Handler: lambda_function.lambda_handler
       MemorySize: 512
       Timeout: 300
       Layers:
@@ -441,14 +444,14 @@ Resources:
                 - s3:GetObject
                 - s3:PutObject
               Resource:
-                - !Sub "arn:aws:s3:::${DocumentBucket}/*"
+                - "arn:aws:s3:::intelliprocess-ai-documents/*"
             - Sid: DynamoDBCRUDProcessor
               Effect: Allow
               Action:
                 - dynamodb:GetItem
-                - dynamoDB:PutItem
-                - dynamoDB:UpdateItem
-                - dynamoDB:DeleteItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
               Resource:
                 - !GetAtt InvoicesTable.Arn
             - Sid: DynamoDBReadReferenceData
@@ -456,6 +459,7 @@ Resources:
               Action:
                 - dynamodb:GetItem
                 - dynamodb:Query
+                - dynamodb:Scan   # matcher fuzzy-vendor PO fallback (_scan_pos_by_vendor)
               Resource:
                 - !GetAtt PurchaseOrdersTable.Arn
                 - !Sub "${PurchaseOrdersTable.Arn}/index/*"
@@ -466,8 +470,8 @@ Resources:
               Action:
                 - bedrock:InvokeModel
               Resource:
-                - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0"
-                - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+                - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/*"
+                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
             - Sid: BDAInvokePermissions
               Effect: Allow
               Action:
@@ -483,7 +487,7 @@ Resources:
       Action: 'lambda:InvokeFunction'
       FunctionName: !GetAtt InvoiceProcessorFunction.Arn
       Principal: s3.amazonaws.com
-      SourceArn: !Sub "arn:aws:s3:::intelliprocess-documents-${Stage}-${AWS::AccountId}"
+      SourceArn: "arn:aws:s3:::intelliprocess-ai-documents"
       SourceAccount: !Ref "AWS::AccountId"
 
   # Function 3: ChatHandler
@@ -492,7 +496,7 @@ Resources:
     Properties:
       FunctionName: !Sub "intelliprocess-chat-${Stage}"
       CodeUri: functions/chat_handler/
-      Handler: app.lambda_handler
+      Handler: lambda_function.lambda_handler
       MemorySize: 256
       Timeout: 60
       Layers:
@@ -536,10 +540,12 @@ Resources:
                 - bedrock:RetrieveAndGenerate
                 - bedrock:InvokeModel
               Resource:
-                - !Sub "arn:aws:bedrock:us-east-1:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
-                - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0"
-                - "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
-                - "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0"
+                - !If
+                  - HasKnowledgeBase
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*"
+                - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/*"
+                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
 
   # Function 4: DashboardHandler
   DashboardHandlerFunction:
@@ -547,7 +553,7 @@ Resources:
     Properties:
       FunctionName: !Sub "intelliprocess-dashboard-${Stage}"
       CodeUri: functions/dashboard_handler/
-      Handler: app.lambda_handler
+      Handler: lambda_function.lambda_handler
       MemorySize: 128
       Timeout: 10
       Layers:
@@ -614,7 +620,7 @@ Resources:
               Action:
                 - s3:GetObject
               Resource:
-                - !Sub "arn:aws:s3:::${DocumentBucket}/*"
+                - "arn:aws:s3:::intelliprocess-ai-documents/*"
             - Sid: DynamoDBReadWriteAllTables
               Effect: Allow
               Action:
@@ -638,7 +644,10 @@ Resources:
               Action:
                 - bedrock:StartIngestionJob
               Resource:
-                - !Sub "arn:aws:bedrock:us-east-1:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+                - !If
+                  - HasKnowledgeBase
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*"
 
 Outputs:
   Region:

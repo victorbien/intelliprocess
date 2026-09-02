@@ -24,13 +24,18 @@ def sync_layer() -> None:
     # Ensure the target app/ directory exists
     LAYER_APP_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Modules to include in the layer
+    # Modules to include in the layer.
+    # Includes the FastAPI app entry point (main.py) and routers so the
+    # API Lambda functions can expose it via a thin Mangum handler.
     modules_to_copy = [
         "config.py",
         "__init__.py",
+        "main.py",
+        "dev_mock.py",
         "models",
         "services",
         "middleware",
+        "routers",
     ]
 
     for module in modules_to_copy:
@@ -56,7 +61,7 @@ def sync_layer() -> None:
             shutil.copy2(src, dst)
             print(f"  [FILE] {module}")
 
-    print(f"\nLayer sync complete → {LAYER_APP_DIR}")
+    print(f"\nLayer sync complete -> {LAYER_APP_DIR}")
 
 
 if __name__ == "__main__":

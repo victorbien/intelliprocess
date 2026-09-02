@@ -542,3 +542,24 @@ class GoodsReceiptUploadResponse(BaseModel):
     message: str = "Goods receipt stored and linked to the purchase order."
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Admin: Approval Settings ─────────────────────────────────────────────────
+
+
+class ApprovalSettings(BaseModel):
+    """Admin-configurable approval/matching thresholds.
+
+    Used as both the PUT /admin/settings request body and the GET response.
+    - amount_threshold:      invoice total auto-approval ceiling (USD).
+    - confidence_threshold:  minimum extraction confidence to auto-approve (0.0-1.0).
+    - po_amount_tolerance:   three-way match margin for PO amount (0.0 = exact, 0.02 = +/-2%).
+    - gr_qty_tolerance:      three-way match margin for GR quantity (0.0 = exact, 0.02 = +/-2%).
+    """
+
+    amount_threshold: float = Field(..., alias="amountThreshold", ge=0)
+    confidence_threshold: float = Field(..., alias="confidenceThreshold", ge=0.0, le=1.0)
+    po_amount_tolerance: float = Field(..., alias="poAmountTolerance", ge=0.0, le=1.0)
+    gr_qty_tolerance: float = Field(..., alias="grQtyTolerance", ge=0.0, le=1.0)
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}

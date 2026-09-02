@@ -34,6 +34,7 @@ from app.services.dynamo import DynamoClient
 from app.services.extraction import ExtractionError, extract_invoice
 from app.services.matcher import match_goods_receipt, match_purchase_order, three_way_match
 from app.services.rules import evaluate_approval_rules
+from app.services.settings_store import get_approval_settings
 
 logger = logging.getLogger(__name__)
 
@@ -168,10 +169,15 @@ def _run_pipeline(
     line_items = extraction.get("lineItems") or []
     invoiced_qty = sum(float(item.get("quantity", 0)) for item in line_items)
 
+    # Load admin-configurable thresholds once (falls back to defaults if unset).
+    approval_settings = get_approval_settings()
+    logger.info("Loaded approval settings", extra={**log_ctx, **approval_settings})
+
     po_result = match_purchase_order(
         po_number=po_number,
         vendor_name=vendor_name,
         invoice_amount=total_amount,
+        amount_tolerance=approval_settings["poAmountTolerance"],
     )
 
     # Use the matched PO ID if we found one (more reliable for GR lookup)
@@ -180,6 +186,7 @@ def _run_pipeline(
     gr_result = match_goods_receipt(
         po_number=gr_po_number,
         invoiced_quantity=invoiced_qty,
+        qty_tolerance=approval_settings["grQtyTolerance"],
     )
 
     match_result = three_way_match(po_result=po_result, gr_result=gr_result)
@@ -191,6 +198,8 @@ def _run_pipeline(
         vendor_name=vendor_name,
         three_way_match_status=match_result["status"],
         discrepancies=match_result.get("discrepancies", []),
+        amount_threshold=approval_settings["amountThreshold"],
+        confidence_threshold=approval_settings["confidenceThreshold"],
     )
 
     # ── 7. Persist match + decision; final status update ─────────────────────

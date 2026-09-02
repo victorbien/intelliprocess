@@ -1,15 +1,17 @@
 """Approval rules engine.
 
-Evaluates four ordered business rules and returns an APPROVE or ESCALATE
+Evaluates three ordered business rules and returns an APPROVE or ESCALATE
 decision (FR-AP-006, FR-AP-007, AC-3.6.x, AC-3.7.x).
 
 Rule priority order (first failure wins for escalation routing):
   RULE-001  Three-way match must PASS         → ESCALATE to AP_CLERK
-  RULE-002  Total amount ≤ $10,000            → ESCALATE to FINANCE_MANAGER
-  RULE-003  Overall confidence ≥ 0.85         → ESCALATE to AP_CLERK
-  RULE-004  Vendor in approved vendor list    → ESCALATE to AP_CLERK
+  RULE-002  Total amount ≤ threshold          → ESCALATE to FINANCE_MANAGER
+  RULE-003  Overall confidence ≥ threshold    → ESCALATE to AP_CLERK
 
-All four must pass for auto-approval (AC-3.6.1).
+All three must pass for auto-approval (AC-3.6.1).
+
+Note: the approved-vendor list check (formerly RULE-004) has been removed;
+vendor membership no longer gates approval.
 
 Note: RULE-002 (amount) is checked *after* RULE-001 (match) in the list but
 routes to FINANCE_MANAGER — the escalation target depends on *which* rule
@@ -27,17 +29,6 @@ logger = logging.getLogger(__name__)
 AMOUNT_THRESHOLD: float = 10_000.00
 CONFIDENCE_THRESHOLD: float = 0.85
 
-# Approved vendors list (FR-AP-006 rule 4)
-APPROVED_VENDORS: frozenset[str] = frozenset(
-    {
-        "Acme Office Supplies Inc.",
-        "TechParts Global Ltd.",
-        "Facilities Maintenance Co.",
-        "CloudServ Solutions",
-        "PrintWorks Inc.",
-    }
-)
-
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
@@ -47,6 +38,8 @@ def evaluate_approval_rules(
     vendor_name: str,
     three_way_match_status: str,
     discrepancies: list[str],
+    amount_threshold: float = AMOUNT_THRESHOLD,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
 ) -> dict[str, Any]:
     """Evaluate all four approval rules and return the decision.
 
@@ -78,6 +71,8 @@ def evaluate_approval_rules(
         vendor_name=vendor_name,
         three_way_match_status=three_way_match_status,
         discrepancies=discrepancies,
+        amount_threshold=amount_threshold,
+        confidence_threshold=confidence_threshold,
     )
 
     all_passed = all(r["passed"] for r in rules_results)
@@ -106,6 +101,8 @@ def evaluate_approval_rules(
         overall_confidence=overall_confidence,
         vendor_name=vendor_name,
         discrepancies=discrepancies,
+        amount_threshold=amount_threshold,
+        confidence_threshold=confidence_threshold,
     )
 
     logger.info(
@@ -134,13 +131,14 @@ def _evaluate_rules(
     vendor_name: str,
     three_way_match_status: str,
     discrepancies: list[str],
+    amount_threshold: float = AMOUNT_THRESHOLD,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
 ) -> list[dict[str, Any]]:
     """Build and evaluate all four rules. Returns full results list."""
 
     rule1_pass = three_way_match_status == "PASS"
-    rule2_pass = total_amount <= AMOUNT_THRESHOLD
-    rule3_pass = overall_confidence >= CONFIDENCE_THRESHOLD
-    rule4_pass = vendor_name in APPROVED_VENDORS
+    rule2_pass = total_amount <= amount_threshold
+    rule3_pass = overall_confidence >= confidence_threshold
 
     return [
         {
@@ -156,7 +154,7 @@ def _evaluate_rules(
             "passed": rule2_pass,
             "detail": (
                 f"Amount ${total_amount:,.2f} "
-                f"{'≤' if rule2_pass else '>'} threshold ${AMOUNT_THRESHOLD:,.2f}"
+                f"{'≤' if rule2_pass else '>'} threshold ${amount_threshold:,.2f}"
             ),
         },
         {
@@ -165,16 +163,7 @@ def _evaluate_rules(
             "passed": rule3_pass,
             "detail": (
                 f"Overall confidence {overall_confidence:.2f} "
-                f"{'≥' if rule3_pass else '<'} threshold {CONFIDENCE_THRESHOLD:.2f}"
-            ),
-        },
-        {
-            "ruleId": "RULE-004",
-            "name":   "Approved Vendor",
-            "passed": rule4_pass,
-            "detail": (
-                f"Vendor '{vendor_name}' "
-                f"{'is' if rule4_pass else 'is NOT'} in the approved vendor list"
+                f"{'≥' if rule3_pass else '<'} threshold {confidence_threshold:.2f}"
             ),
         },
     ]
@@ -186,6 +175,8 @@ def _escalation_target(
     overall_confidence: float,
     vendor_name: str,
     discrepancies: list[str],
+    amount_threshold: float = AMOUNT_THRESHOLD,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
 ) -> tuple[str, str]:
     """Return (escalate_to, reason) for the most important failure.
 
@@ -198,7 +189,7 @@ def _escalation_target(
     if "RULE-002" in failed_ids:
         reason = (
             f"Amount ${total_amount:,.2f} exceeds the auto-approval "
-            f"threshold of ${AMOUNT_THRESHOLD:,.2f}."
+            f"threshold of ${amount_threshold:,.2f}."
         )
         return "FINANCE_MANAGER", reason
 
@@ -208,18 +199,10 @@ def _escalation_target(
         reason = f"Three-way match failed: {disc_str}"
         return "AP_CLERK", reason
 
-    # RULE-003 failure
-    if "RULE-003" in failed_ids:
-        reason = (
-            f"Extraction confidence {overall_confidence:.2f} is below the "
-            f"required threshold of {CONFIDENCE_THRESHOLD:.2f}. "
-            "Manual verification of extracted fields is required."
-        )
-        return "AP_CLERK", reason
-
-    # RULE-004 failure
+    # RULE-003 failure (the only remaining rule)
     reason = (
-        f"Vendor '{vendor_name}' is not in the approved vendor list. "
-        "Please verify and add the vendor before approving."
+        f"Extraction confidence {overall_confidence:.2f} is below the "
+        f"required threshold of {confidence_threshold:.2f}. "
+        "Manual verification of extracted fields is required."
     )
     return "AP_CLERK", reason

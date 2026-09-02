@@ -27,6 +27,7 @@ from app.middleware import AppError, CurrentUser, require_role
 from app.models.enums import UserRole
 from app.models.schemas import (
     ApiResponse,
+    ApprovalSettings,
     DashboardStatsResponse,
     GoodsReceiptUploadRequest,
     GoodsReceiptUploadResponse,
@@ -37,6 +38,7 @@ from app.models.schemas import (
 )
 from app.services.dashboard import compute_stats, default_seed_data
 from app.services.dynamo import DynamoClient
+from app.services.settings_store import get_approval_settings, put_approval_settings
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,83 @@ async def seed_data(
             goodsReceiptsCreated=gr_count,
         )
     )
+
+
+# ── GET /admin/settings ───────────────────────────────────────────────────────
+
+
+@admin_router.get(
+    "/settings",
+    response_model=ApiResponse[ApprovalSettings],
+)
+async def get_settings(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+):
+    """Return the current admin-configurable approval/matching thresholds.
+
+    Admin-only. Falls back to built-in defaults when none have been saved.
+    """
+    logger.info("Approval settings requested", extra={"userId": user.user_id})
+
+    try:
+        values = get_approval_settings()
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Failed to read approval settings", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while retrieving settings. Please try again.",
+            status_code=500,
+        )
+
+    return ApiResponse(data=ApprovalSettings(**values))
+
+
+# ── PUT /admin/settings ───────────────────────────────────────────────────────
+
+
+@admin_router.put(
+    "/settings",
+    response_model=ApiResponse[ApprovalSettings],
+)
+async def update_settings(
+    body: ApprovalSettings,
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+):
+    """Update the admin-configurable approval/matching thresholds (ADMIN only).
+
+    Validated ranges (enforced by the schema):
+      - amountThreshold      >= 0
+      - confidenceThreshold  0.0-1.0
+      - poAmountTolerance    0.0-1.0  (0 = exact match)
+      - grQtyTolerance       0.0-1.0  (0 = exact match)
+    """
+    logger.info(
+        "Approval settings update",
+        extra={
+            "userId": user.user_id,
+            "amountThreshold": body.amount_threshold,
+            "confidenceThreshold": body.confidence_threshold,
+            "poAmountTolerance": body.po_amount_tolerance,
+            "grQtyTolerance": body.gr_qty_tolerance,
+        },
+    )
+
+    try:
+        stored = put_approval_settings(
+            {
+                "amountThreshold":     body.amount_threshold,
+                "confidenceThreshold": body.confidence_threshold,
+                "poAmountTolerance":   body.po_amount_tolerance,
+                "grQtyTolerance":      body.gr_qty_tolerance,
+            }
+        )
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Failed to write approval settings", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while saving settings. Please try again.",
+            status_code=500,
+        )
+
+    return ApiResponse(data=ApprovalSettings(**stored))
 
 
 # ── POST /purchase-orders/upload ──────────────────────────────────────────────

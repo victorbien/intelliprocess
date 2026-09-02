@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     GR_TABLE: str = ""
     CONVERSATION_TABLE: str = ""
     DOCUMENT_TABLE: str = ""
+    CONFIG_TABLE: str = ""
 
     # Amazon Bedrock
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-sonnet-20240229-v1:0"

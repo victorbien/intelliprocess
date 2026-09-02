@@ -52,6 +52,7 @@ Globals:
         GR_TABLE: !Ref GoodsReceiptsTable
         CONVERSATION_TABLE: !Ref ConversationsTable
         DOCUMENT_TABLE: !Ref DocumentsTable
+        CONFIG_TABLE: !Ref AppConfigTable
         KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
         BDA_PROJECT_ARN: !Ref BDAProjectArn
         GUARDRAIL_ID: !Ref GuardrailId
@@ -324,6 +325,21 @@ Resources:
           Projection:
             ProjectionType: ALL
 
+  # Singleton app-configuration table (admin-tunable approval/matching thresholds).
+  AppConfigTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "IntelliProcess-AppConfig-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: configKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: configKey
+          KeyType: HASH
+
   # =========================================================================
   # 4. SHARED CODE LAYER
   # =========================================================================
@@ -454,6 +470,12 @@ Resources:
                 - dynamodb:DeleteItem
               Resource:
                 - !GetAtt InvoicesTable.Arn
+            - Sid: DynamoDBReadAppConfig
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                - !GetAtt AppConfigTable.Arn
             - Sid: DynamoDBReadReferenceData
               Effect: Allow
               Action:
@@ -601,6 +623,18 @@ Resources:
             Path: /admin/seed-data
             Method: post
             RestApiId: !Ref ApiGateway
+        GetSettingsApi:
+          Type: Api
+          Properties:
+            Path: /admin/settings
+            Method: get
+            RestApiId: !Ref ApiGateway
+        UpdateSettingsApi:
+          Type: Api
+          Properties:
+            Path: /admin/settings
+            Method: put
+            RestApiId: !Ref ApiGateway
         UploadPurchaseOrderApi:
           Type: Api
           Properties:
@@ -639,6 +673,7 @@ Resources:
                 - !Sub "${GoodsReceiptsTable.Arn}/index/*"
                 - !GetAtt DocumentsTable.Arn
                 - !Sub "${DocumentsTable.Arn}/index/*"
+                - !GetAtt AppConfigTable.Arn
             - Sid: BedrockKBSyncPermissions
               Effect: Allow
               Action:
@@ -680,3 +715,6 @@ Outputs:
   DocumentsTableName:
     Description: Documents table name
     Value: !Ref DocumentsTable
+  AppConfigTableName:
+    Description: App configuration (admin approval settings) table name
+    Value: !Ref AppConfigTable

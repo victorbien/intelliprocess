@@ -57,7 +57,6 @@ _APPROVE_DECISION = {
         {"ruleId": "RULE-001", "name": "Three-Way Match", "passed": True, "detail": ""},
         {"ruleId": "RULE-002", "name": "Amount Threshold", "passed": True, "detail": ""},
         {"ruleId": "RULE-003", "name": "Confidence Threshold", "passed": True, "detail": ""},
-        {"ruleId": "RULE-004", "name": "Approved Vendor", "passed": True, "detail": ""},
     ],
 }
 
@@ -69,7 +68,6 @@ _ESCALATE_DECISION = {
         {"ruleId": "RULE-001", "name": "Three-Way Match", "passed": True, "detail": ""},
         {"ruleId": "RULE-002", "name": "Amount Threshold", "passed": False, "detail": ""},
         {"ruleId": "RULE-003", "name": "Confidence Threshold", "passed": True, "detail": ""},
-        {"ruleId": "RULE-004", "name": "Approved Vendor", "passed": True, "detail": ""},
     ],
 }
 

@@ -44,6 +44,7 @@ def match_purchase_order(
     po_number: str | None,
     vendor_name: str,
     invoice_amount: float,
+    amount_tolerance: float = _PO_AMOUNT_TOLERANCE,
 ) -> dict[str, Any]:
     """Match an extracted invoice against a Purchase Order.
 
@@ -112,7 +113,7 @@ def match_purchase_order(
         else 1.0
     )
 
-    if variance_pct > _PO_AMOUNT_TOLERANCE + _FLOAT_EPSILON:
+    if variance_pct > amount_tolerance + _FLOAT_EPSILON:
         discrepancies.append(
             f"Amount variance {variance_pct * 100:.1f}%: "
             f"PO ${po_amount:.2f} vs Invoice ${invoice_amount:.2f}"
@@ -148,6 +149,7 @@ def match_purchase_order(
 def match_goods_receipt(
     po_number: str | None,
     invoiced_quantity: float,
+    qty_tolerance: float = _GR_QTY_TOLERANCE,
 ) -> dict[str, Any]:
     """Verify that goods/services for a PO have been received.
 
@@ -193,11 +195,11 @@ def match_goods_receipt(
     total_received = sum(_to_float(gr.get("totalQuantityReceived", 0)) for gr in grs)
     first_gr_id = grs[0].get("grId")
 
-    # 2 % tolerance (AC-3.4.2): invoiced ≤ received + 2 %
-    tolerance_qty = invoiced_quantity * _GR_QTY_TOLERANCE
+    # Quantity tolerance (AC-3.4.2): invoiced ≤ received + tolerance %
+    tolerance_qty = invoiced_quantity * qty_tolerance
     discrepancies: list[str] = []
 
-    if total_received < invoiced_quantity - tolerance_qty:
+    if total_received < invoiced_quantity - tolerance_qty - _FLOAT_EPSILON:
         shortage = invoiced_quantity - total_received
         discrepancies.append(
             f"Quantity shortage: invoiced {invoiced_quantity:.0f}, "

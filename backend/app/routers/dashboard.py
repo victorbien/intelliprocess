@@ -19,18 +19,25 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated
 
+import base64
+import json
+
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.middleware import AppError, CurrentUser, require_role
-from app.models.enums import UserRole
+from app.models.enums import INVOICE_CONTENT_TYPES, MAX_FILE_SIZE_BYTES, UserRole
 from app.models.schemas import (
     ApiResponse,
     ApprovalSettings,
     DashboardStatsResponse,
+    ExtractPending,
+    GoodsReceiptExtractResponse,
     GoodsReceiptUploadRequest,
     GoodsReceiptUploadResponse,
+    PurchaseOrderExtractResponse,
     PurchaseOrderUploadRequest,
     PurchaseOrderUploadResponse,
     SeedDataRequest,
@@ -38,7 +45,19 @@ from app.models.schemas import (
 )
 from app.services.dashboard import compute_stats, default_seed_data
 from app.services.dynamo import DynamoClient
+from app.services.extraction import (
+    ExtractionError,
+    ExtractionTimeout,
+    extract_from_bytes,
+    finalize_bda_job,
+    poll_bda_status,
+    start_bda_job,
+)
 from app.services.settings_store import get_approval_settings, put_approval_settings
+
+# Synchronous wait budget before falling back to async polling. Kept below the
+# API Gateway 29s integration ceiling with margin for upload + response.
+_SYNC_EXTRACT_TIMEOUT_S = 18.0
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +307,145 @@ async def upload_purchase_order(
     )
 
 
+# ── Upload-and-extract helpers ────────────────────────────────────────────────
+
+
+def _encode_job(invocation_arn: str, kind: str) -> str:
+    """Encode an async extract job into an opaque stateless token."""
+    raw = json.dumps({"arn": invocation_arn, "kind": kind}).encode()
+    return base64.urlsafe_b64encode(raw).decode()
+
+
+def _decode_job(token: str, expected_kind: str) -> str:
+    """Decode a job token, returning its invocation ARN. Raises AppError if bad."""
+    try:
+        data = json.loads(base64.urlsafe_b64decode(token.encode()))
+        if data.get("kind") != expected_kind or not data.get("arn"):
+            raise ValueError("token mismatch")
+        return str(data["arn"])
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise AppError("Invalid or expired job id.", status_code=400) from exc
+
+
+def _map_po(extraction: dict) -> PurchaseOrderExtractResponse:
+    total = extraction.get("totalAmount")
+    return PurchaseOrderExtractResponse(
+        poNumber=_clean_str(extraction.get("invoiceNumber")),
+        vendorName=_clean_str(extraction.get("vendorName")),
+        totalAmount=float(total) if isinstance(total, (int, float)) and total else None,
+        overallConfidence=extraction.get("overallConfidence"),
+    )
+
+
+def _map_gr(extraction: dict) -> GoodsReceiptExtractResponse:
+    line_items = extraction.get("lineItems") or []
+    total_qty = sum(
+        float(li.get("quantity", 0))
+        for li in line_items
+        if isinstance(li, dict) and isinstance(li.get("quantity"), (int, float))
+    )
+    return GoodsReceiptExtractResponse(
+        grId=_clean_str(extraction.get("invoiceNumber")),
+        poNumber=_clean_str(extraction.get("poReference")),
+        totalQuantityReceived=total_qty if total_qty > 0 else None,
+        overallConfidence=extraction.get("overallConfidence"),
+    )
+
+
+async def _read_upload(file: UploadFile) -> tuple[bytes, str, str]:
+    """Read + validate an uploaded document. Returns (bytes, filename, content_type).
+
+    Raises AppError (400) on an unsupported type or oversized/empty file.
+    """
+    content_type = file.content_type or "application/octet-stream"
+    if content_type not in INVOICE_CONTENT_TYPES:
+        raise AppError(
+            f"Unsupported file type '{content_type}'. Upload a PDF, PNG, or JPEG.",
+            status_code=400,
+        )
+
+    data = await file.read()
+    if not data:
+        raise AppError("The uploaded file is empty.", status_code=400)
+    if len(data) > MAX_FILE_SIZE_BYTES:
+        raise AppError(
+            f"File exceeds the maximum size of {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB.",
+            status_code=400,
+        )
+
+    return data, (file.filename or "upload.pdf"), content_type
+
+
+# ── POST /purchase-orders/extract ─────────────────────────────────────────────
+
+
+@po_router.post("/extract")
+async def extract_purchase_order(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+    file: Annotated[UploadFile, File(...)],
+):
+    """Start PO extraction from an uploaded document (ADMIN, no persistence).
+
+    Sync-then-async: waits up to ~20s for BDA. If it finishes, returns 200 with
+    the mapped PO fields; if still running, returns 202 with a jobId the client
+    polls via GET /purchase-orders/extract/status. The frontend pre-fills the PO
+    form so the admin can confirm/correct before saving.
+    """
+    data, filename, content_type = await _read_upload(file)
+    logger.info("PO extract requested", extra={"userId": user.user_id, "fileName": filename})
+
+    try:
+        extraction = extract_from_bytes(
+            file_bytes=data,
+            filename=filename,
+            prefix="po-uploads",
+            content_type=content_type,
+            timeout_s=_SYNC_EXTRACT_TIMEOUT_S,
+        )
+    except ExtractionTimeout as pending:
+        token = _encode_job(pending.invocation_arn, "po")
+        return JSONResponse(
+            status_code=202,
+            content=ApiResponse(status_code=202, data=ExtractPending(jobId=token)).model_dump(by_alias=True),
+        )
+    except ExtractionError as exc:
+        logger.error("PO extraction failed", extra={"reason": str(exc)})
+        raise AppError(
+            "Could not extract details from the document. Enter the fields manually.",
+            status_code=422,
+        )
+
+    return ApiResponse(data=_map_po(extraction))
+
+
+@po_router.get("/extract/status")
+async def po_extract_status(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+    job_id: Annotated[str, Query(alias="jobId")],
+):
+    """Poll a pending PO extraction job. Returns 200 (fields), 202 (pending), or 422."""
+    invocation_arn = _decode_job(job_id, "po")
+    try:
+        status = poll_bda_status(invocation_arn)
+    except ExtractionError as exc:
+        logger.error("PO extract status failed", extra={"reason": str(exc)})
+        raise AppError("Could not check extraction status. Try again.", status_code=422)
+
+    if status == "InProgress":
+        return JSONResponse(
+            status_code=202,
+            content=ApiResponse(status_code=202, data=ExtractPending(jobId=job_id)).model_dump(by_alias=True),
+        )
+    if status == "Failed":
+        raise AppError(
+            "Could not extract details from the document. Enter the fields manually.",
+            status_code=422,
+        )
+
+    extraction = finalize_bda_job(invocation_arn)
+    return ApiResponse(data=_map_po(extraction))
+
+
 # ── POST /goods-receipts/upload ───────────────────────────────────────────────
 
 
@@ -364,7 +522,85 @@ async def upload_goods_receipt(
     )
 
 
+# ── POST /goods-receipts/extract ──────────────────────────────────────────────
+
+
+@gr_router.post("/extract")
+async def extract_goods_receipt(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+    file: Annotated[UploadFile, File(...)],
+):
+    """Start GR extraction from an uploaded document (ADMIN, no persistence).
+
+    Sync-then-async: waits up to ~20s for BDA. If it finishes, returns 200 with
+    the mapped GR fields (document id -> grId, PO reference -> poNumber, summed
+    line-item quantities -> totalQuantityReceived); if still running, returns 202
+    with a jobId the client polls via GET /goods-receipts/extract/status.
+    """
+    data, filename, content_type = await _read_upload(file)
+    logger.info("GR extract requested", extra={"userId": user.user_id, "fileName": filename})
+
+    try:
+        extraction = extract_from_bytes(
+            file_bytes=data,
+            filename=filename,
+            prefix="gr-uploads",
+            content_type=content_type,
+            timeout_s=_SYNC_EXTRACT_TIMEOUT_S,
+        )
+    except ExtractionTimeout as pending:
+        token = _encode_job(pending.invocation_arn, "gr")
+        return JSONResponse(
+            status_code=202,
+            content=ApiResponse(status_code=202, data=ExtractPending(jobId=token)).model_dump(by_alias=True),
+        )
+    except ExtractionError as exc:
+        logger.error("GR extraction failed", extra={"reason": str(exc)})
+        raise AppError(
+            "Could not extract details from the document. Enter the fields manually.",
+            status_code=422,
+        )
+
+    return ApiResponse(data=_map_gr(extraction))
+
+
+@gr_router.get("/extract/status")
+async def gr_extract_status(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+    job_id: Annotated[str, Query(alias="jobId")],
+):
+    """Poll a pending GR extraction job. Returns 200 (fields), 202 (pending), or 422."""
+    invocation_arn = _decode_job(job_id, "gr")
+    try:
+        status = poll_bda_status(invocation_arn)
+    except ExtractionError as exc:
+        logger.error("GR extract status failed", extra={"reason": str(exc)})
+        raise AppError("Could not check extraction status. Try again.", status_code=422)
+
+    if status == "InProgress":
+        return JSONResponse(
+            status_code=202,
+            content=ApiResponse(status_code=202, data=ExtractPending(jobId=job_id)).model_dump(by_alias=True),
+        )
+    if status == "Failed":
+        raise AppError(
+            "Could not extract details from the document. Enter the fields manually.",
+            status_code=422,
+        )
+
+    extraction = finalize_bda_job(invocation_arn)
+    return ApiResponse(data=_map_gr(extraction))
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _clean_str(value: object) -> str | None:
+    """Return a trimmed non-empty string, or None."""
+    if isinstance(value, str):
+        s = value.strip()
+        return s or None
+    return None
 
 
 def _write_records(

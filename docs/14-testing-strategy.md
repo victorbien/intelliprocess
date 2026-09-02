@@ -182,7 +182,7 @@ class TestGoodsReceiptMatching:
 class TestApprovalRules:
     
     def test_all_rules_pass_approve(self):
-        """All 4 rules pass → APPROVE"""
+        """All 3 rules pass → APPROVE"""
         result = evaluate_approval_rules(
             total_amount=5000.00,
             overall_confidence=0.95,
@@ -223,8 +223,10 @@ class TestApprovalRules:
         assert result["escalateTo"] == "AP_CLERK"
         assert "confidence" in result["reason"].lower()
     
-    def test_unapproved_vendor_escalates(self):
-        """Vendor not in approved list → ESCALATE"""
+    def test_unknown_vendor_still_auto_approves(self):
+        """Vendor membership no longer gates approval (former RULE-004 removed).
+
+        An unknown vendor auto-approves when the remaining rules pass."""
         result = evaluate_approval_rules(
             total_amount=500.00,
             overall_confidence=0.95,
@@ -233,8 +235,7 @@ class TestApprovalRules:
             discrepancies=[]
         )
         
-        assert result["decision"] == "ESCALATE"
-        assert "not in the approved" in result["reason"].lower()
+        assert result["decision"] == "APPROVE"
     
     def test_match_failure_escalates(self):
         """Three-way match fails → ESCALATE to AP_CLERK"""

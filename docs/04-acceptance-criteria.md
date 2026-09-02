@@ -104,18 +104,18 @@ Criteria are grouped by user story and each criterion has a unique ID for test t
 
 | AC ID | Criterion |
 |-------|-----------|
-| AC-3.3.1 | **Given** an extracted invoice with a PO reference number, **When** matching runs, **Then** the system finds the PO with that exact number and returns MATCHED if vendor and amount align (within 5% tolerance). |
+| AC-3.3.1 | **Given** an extracted invoice with a PO reference number, **When** matching runs, **Then** the system finds the PO with that exact number and returns MATCHED if vendor and amount align (within the configured PO amount tolerance, default 5%). |
 | AC-3.3.2 | **Given** an extracted invoice without a PO reference, **When** matching runs, **Then** the system attempts fuzzy matching by vendor name + approximate amount and returns PARTIAL_MATCH or NO_MATCH. |
 | AC-3.3.3 | **Given** the invoice PO number does not exist in the system, **When** matching runs, **Then** the result is NO_MATCH with reason "PO not found". |
-| AC-3.3.4 | **Given** a PO match with amount variance > 5%, **When** matching runs, **Then** the result is PARTIAL_MATCH with the specific discrepancy amount noted. |
+| AC-3.3.4 | **Given** a PO match with amount variance greater than the configured PO amount tolerance (default 5%), **When** matching runs, **Then** the result is PARTIAL_MATCH with the specific discrepancy amount noted. |
 
 ### US-3.4: Automatic Goods Receipt Verification
 
 | AC ID | Criterion |
 |-------|-----------|
 | AC-3.4.1 | **Given** a matched PO, **When** GR verification runs, **Then** the system checks if a Goods Receipt exists for that PO number. |
-| AC-3.4.2 | **Given** a GR exists, **When** quantity verification runs, **Then** invoiced quantity ≤ received quantity + 2% tolerance results in CONFIRMED. |
-| AC-3.4.3 | **Given** invoiced quantity exceeds received quantity by more than 2%, **When** verification runs, **Then** the result is PARTIAL with the over-invoiced amount noted. |
+| AC-3.4.2 | **Given** a GR exists, **When** quantity verification runs, **Then** invoiced quantity ≤ received quantity + the configured GR quantity tolerance (default 2%) results in CONFIRMED. |
+| AC-3.4.3 | **Given** invoiced quantity exceeds received quantity by more than the configured GR quantity tolerance (default 2%), **When** verification runs, **Then** the result is PARTIAL with the over-invoiced amount noted. |
 | AC-3.4.4 | **Given** no GR exists for the matched PO, **When** verification runs, **Then** the result is NOT_RECEIVED. |
 
 ### US-3.5: Three-Way Match Result
@@ -130,7 +130,7 @@ Criteria are grouped by user story and each criterion has a unique ID for test t
 
 | AC ID | Criterion |
 |-------|-----------|
-| AC-3.6.1 | **Given** an invoice where: three-way match = PASS, amount ≤ $10,000, overall extraction confidence ≥ 0.85, and vendor is in approved list, **When** approval rules evaluate, **Then** the invoice is auto-approved with status "APPROVED", approver="SYSTEM", and timestamp recorded. |
+| AC-3.6.1 | **Given** an invoice where: three-way match = PASS, amount ≤ the amount threshold (default $10,000), and overall extraction confidence ≥ the confidence threshold (default 0.85), **When** approval rules evaluate, **Then** the invoice is auto-approved with status "APPROVED", approver="SYSTEM", and timestamp recorded. (Vendor membership is no longer evaluated — former RULE-004 removed. Thresholds are admin-configurable.) |
 | AC-3.6.2 | **Given** an invoice that meets all criteria except amount > $10,000, **When** approval rules evaluate, **Then** the invoice is NOT auto-approved and is escalated. |
 | AC-3.6.3 | **Given** an auto-approved invoice, **When** the AP Clerk views it, **Then** it shows "Auto-Approved" badge with the timestamp. |
 
@@ -217,8 +217,11 @@ Criteria are grouped by user story and each criterion has a unique ID for test t
 
 | AC ID | Criterion |
 |-------|-----------|
-| AC-5.1.1 | **Given** an Administrator, **When** they upload a Purchase Order document or structured PO data (JSON), **Then** it is stored and available for invoice matching. |
-| AC-5.1.2 | **Given** an Administrator, **When** they upload a Goods Receipt, **Then** it is linked to the corresponding PO and available for three-way matching. |
+| AC-5.1.1 | **Given** an Administrator, **When** they submit structured PO data via POST /purchase-orders/upload, **Then** it is stored in DynamoDB and available for invoice matching. |
+| AC-5.1.2 | **Given** an Administrator, **When** they submit a Goods Receipt via POST /goods-receipts/upload, **Then** it is linked to an existing PO (rejected with 400 if the PO does not exist) and available for three-way matching. |
+| AC-5.1.5 | **Given** an Administrator, **When** they upload a PO/GR document via POST /purchase-orders/extract or /goods-receipts/extract, **Then** candidate fields are extracted (via BDA), returned without being persisted, and pre-filled into an editable form for the admin to confirm and save. |
+| AC-5.1.6 | **Given** an extraction that does not complete within the synchronous window (~18s), **When** the extract endpoint responds, **Then** it returns 202 with a jobId, and the client polls the corresponding /extract/status endpoint until it returns the fields (200) or an error (422). |
+| AC-5.1.7 | **Given** a PO/GR document upload or extraction is in progress, **When** the admin views the form, **Then** the form fields and Save button are disabled and no additional file can be uploaded until it completes. |
 | AC-5.1.3 | **Given** sample data is uploaded, **When** a new invoice references that PO, **Then** the matching logic can find and compare against it. |
 | AC-5.1.4 | **Given** an Administrator, **When** they call POST /admin/seed-data, **Then** sample Purchase Orders and Goods Receipts are loaded into DynamoDB and a success message is returned with the counts created. |
 
@@ -228,6 +231,16 @@ Criteria are grouped by user story and each criterion has a unique ID for test t
 |-------|-----------|
 | AC-5.2.1 | **Given** an Administrator, **When** they navigate to the system health page, **Then** they see: recent error count, API call volume, and average response times. |
 | AC-5.2.2 | **Given** a Lambda function error occurs, **When** the Administrator checks logs, **Then** the error details are available in CloudWatch with correlation IDs. |
+
+### US-5.3: Configure Approval Settings
+
+| AC ID | Criterion |
+|-------|-----------|
+| AC-5.3.1 | **Given** an Administrator, **When** they call GET /admin/settings, **Then** the current approval thresholds are returned (amountThreshold, confidenceThreshold, poAmountTolerance, grQtyTolerance), falling back to built-in defaults if none saved. |
+| AC-5.3.2 | **Given** an Administrator, **When** they submit valid values via PUT /admin/settings, **Then** the settings are persisted to the AppConfig table and echoed back. |
+| AC-5.3.3 | **Given** a value outside its allowed range (confidence/tolerances 0–1, amount ≥ 0), **When** PUT /admin/settings is called, **Then** the request is rejected with 400. |
+| AC-5.3.4 | **Given** updated settings, **When** the next invoice is processed, **Then** the pipeline applies the new thresholds/tolerances to matching and approval. |
+| AC-5.3.5 | **Given** a non-ADMIN user, **When** they call /admin/settings, **Then** the request is rejected with 403. |
 
 ---
 
@@ -239,8 +252,8 @@ Criteria are grouped by user story and each criterion has a unique ID for test t
 | 2. Document Management | 4 | 14 | 12 | 2 |
 | 3. Invoice Processing | 7 | 26 | 20 | 6 |
 | 4. Records Search | 6 | 16 | 10 | 6 |
-| 5. Administration | 2 | 6 | 4 | 2 |
-| **Total** | **21** | **70** | **54** | **16** |
+| 5. Administration | 3 | 14 | 12 | 2 |
+| **Total** | **22** | **78** | **62** | **16** |
 
 ---
 

@@ -83,6 +83,32 @@ class S3Client:
             )
             raise
 
+    def upload_bytes(self, key: str, data: bytes, content_type: str) -> str:
+        """Upload raw bytes to S3 (server-side). Returns the object key.
+
+        Used for synchronous server-side ingestion (e.g. admin PO/GR upload +
+        immediate BDA extraction), as opposed to browser presigned uploads.
+        """
+        try:
+            client = self._get_client()
+            client.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type,
+            )
+            logger.info(
+                "Uploaded object to S3",
+                extra={"bucket": self._bucket, "key": key, "size": len(data)},
+            )
+            return key
+        except ClientError as e:
+            logger.error(
+                "Failed to upload object to S3",
+                extra={"bucket": self._bucket, "key": key, "error": str(e)},
+            )
+            raise
+
     def generate_presigned_get(
         self,
         key: str,

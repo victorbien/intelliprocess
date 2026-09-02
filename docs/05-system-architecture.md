@@ -49,6 +49,9 @@ The system is decomposed into loosely coupled services that communicate via API 
 │  │   GET  /invoices/{id}            POST /invoices/{id}/approve             │   │
 │  │   POST /documents/upload         POST /chat                              │   │
 │  │   GET  /dashboard/stats          GET /documents                          │   │
+│  │   GET/PUT /admin/settings        POST /admin/seed-data                   │   │
+│  │   POST /purchase-orders/upload   POST /purchase-orders/extract (+status) │   │
+│  │   POST /goods-receipts/upload    POST /goods-receipts/extract  (+status) │   │
 │  └──────────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                         │
@@ -112,12 +115,13 @@ The system is decomposed into loosely coupled services that communicate via API 
 │                                                                                  │
 │  ┌────────────────────┐  ┌────────────────────┐  ┌──────────────────────────┐  │
 │  │  Amazon S3         │  │  Amazon DynamoDB   │  │  OpenSearch Serverless   │  │
-│  │                    │  │                    │  │  (via Knowledge Bases)   │  │
-│  │  /invoices/        │  │  InvoiceTable      │  │                          │  │
-│  │  /purchase-orders/ │  │  DocumentTable     │  │  Vector embeddings       │  │
-│  │  /goods-receipts/  │  │  ConversationTable │  │  (managed by Bedrock KB) │  │
-│  │  /records/         │  │  POTable           │  │                          │  │
+│  │ (ai-documents)     │  │                    │  │  (via Knowledge Bases)   │  │
+│  │  invoices/         │  │  InvoiceTable      │  │                          │  │
+│  │  po-uploads/       │  │  DocumentTable     │  │  Vector embeddings       │  │
+│  │  gr-uploads/       │  │  ConversationTable │  │  (managed by Bedrock KB) │  │
+│  │  bda-output/       │  │  POTable           │  │                          │  │
 │  │                    │  │  GRTable           │  │                          │  │
+│  │                    │  │  AppConfigTable    │  │                          │  │
 │  └────────────────────┘  └────────────────────┘  └──────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```

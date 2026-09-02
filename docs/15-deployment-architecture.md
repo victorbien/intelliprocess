@@ -106,10 +106,12 @@ Globals:
         GR_TABLE: !Ref GoodsReceiptsTable
         CONVERSATION_TABLE: !Ref ConversationsTable
         DOCUMENT_TABLE: !Ref DocumentsTable
+        CONFIG_TABLE: !Ref AppConfigTable        # admin approval settings
         KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
-        BDA_PROJECT_ARN: !Ref BDAProjectArn
+        BDA_PROJECT_ARN: !Ref BDAProjectArn      # optional; public-blueprint path does not require it
         GUARDRAIL_ID: !Ref GuardrailId
         BEDROCK_MODEL_ID: "anthropic.claude-3-sonnet-20240229-v1:0"
+        USE_MOCKS: "false"                       # "true" for local dev (skips real AWS/BDA)
         LOG_LEVEL: "INFO"
 
 Resources:
@@ -117,7 +119,7 @@ Resources:
   DocumentsBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "intelliprocess-docs-${Stage}-${AWS::AccountId}"
+      BucketName: "intelliprocess-ai-documents"   # fixed name in the deployed template
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -315,7 +317,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "intelliprocess-upload-${Stage}"
-      Handler: app.lambda_handler
+      Handler: lambda_function.lambda_handler
       CodeUri: functions/upload_handler/
       MemorySize: 256
       Timeout: 30
@@ -342,7 +344,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "intelliprocess-processor-${Stage}"
-      Handler: app.lambda_handler
+      Handler: lambda_function.lambda_handler
       CodeUri: functions/invoice_processor/
       MemorySize: 512
       Timeout: 300
@@ -374,7 +376,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "intelliprocess-chat-${Stage}"
-      Handler: app.lambda_handler
+      Handler: lambda_function.lambda_handler
       CodeUri: functions/chat_handler/
       MemorySize: 256
       Timeout: 60
@@ -413,20 +415,27 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub "intelliprocess-dashboard-${Stage}"
-      Handler: app.lambda_handler
+      Handler: lambda_function.lambda_handler
       CodeUri: functions/dashboard_handler/
-      MemorySize: 128
-      Timeout: 10
+      MemorySize: 512   # raised from 128 to run BDA polling + PO/GR extraction
+      Timeout: 29       # raised from 10; capped below API Gateway's 29s limit
       Layers: [!Ref SharedLayer]
       Policies:
         - DynamoDBReadPolicy: { TableName: !Ref InvoicesTable }
         - DynamoDBCrudPolicy: { TableName: !Ref PurchaseOrdersTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GoodsReceiptsTable }
         - DynamoDBReadPolicy: { TableName: !Ref DocumentsTable }
-        - S3ReadPolicy: { BucketName: !Ref DocumentsBucket }
+        - DynamoDBCrudPolicy: { TableName: !Ref AppConfigTable }   # /admin/settings read+write
+        - S3CrudPolicy: { BucketName: !Ref DocumentsBucket }       # PO/GR uploads + bda-output/
         - Statement:
             - Effect: Allow
               Action: [bedrock:StartIngestionJob]
+              Resource: "*"
+        - Statement:                                              # PO/GR document extraction via BDA
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeDataAutomationAsync
+                - bedrock:GetDataAutomationStatus
               Resource: "*"
       Events:
         GetInvoices:
@@ -490,6 +499,40 @@ Outputs:
     Value: !Ref CognitoUserPoolClient
 ```
 
+### 2.2 Recent Implementation Changes (deployment-relevant)
+
+The template excerpt above is illustrative. The deployed `backend/template.yaml`
+differs from it in the following ways, all reflected in the current implementation:
+
+- **Handler entry point:** all API Lambdas use `lambda_function.lambda_handler`
+  (a thin `lambda_function.py` that wraps the FastAPI app with Mangum), not
+  `app.lambda_handler`.
+- **Shared layer build:** the layer uses `BuildMethod: makefile`. The Makefile
+  installs `requirements.txt` and copies the `app` package (including
+  `main.py` and all routers) into the layer, so every function shares the same
+  FastAPI application code.
+- **API Gateway (`ApiGateway`, type `AWS::Serverless::Api`):** `EndpointConfiguration: REGIONAL`,
+  a Cognito default authorizer with `AddDefaultAuthorizerToCorsPreflight: false`
+  (so browser CORS preflight `OPTIONS` calls are not challenged), and
+  `BinaryMediaTypes: [multipart/form-data]` to support file uploads.
+- **New table `AppConfigTable` (`IntelliProcess-AppConfig`):** singleton
+  admin-configurable approval settings; `DeletionPolicy: Retain`. Wired into
+  `CONFIG_TABLE` for all functions.
+- **`USE_MOCKS` env var:** `"false"` in Globals for deployed stages; set
+  `"true"` for local development to bypass real AWS/BDA calls.
+- **DocumentsBucket:** fixed name `intelliprocess-ai-documents` with
+  `DeletionPolicy: Retain`; key prefixes `invoices/`, `po-uploads/`,
+  `gr-uploads/`, and `bda-output/`.
+- **DashboardHandler:** `MemorySize: 512`, `Timeout: 29` (was 128 / 10) to
+  accommodate synchronous BDA polling for PO/GR extraction and `/admin/settings`.
+- **IAM additions:** InvoiceProcessor gets DynamoDB `GetItem` on AppConfig plus
+  `Scan` on the PurchaseOrders table (matcher lookups); DashboardHandler gets
+  `bedrock:InvokeDataAutomationAsync` / `bedrock:GetDataAutomationStatus`,
+  `s3:PutObject` (bda-output), and read+write on AppConfig.
+- **BDA:** uses the AWS-managed public invoice blueprint via the
+  `apac.data-automation-v1` profile; no custom BDA project/blueprint is
+  provisioned. `BDA_PROJECT_ARN` is optional and unused by this path.
+- **Region:** deployed in `ap-southeast-2`.
 
 ---
 
@@ -637,8 +680,8 @@ VITE_IDENTITY_POOL_ID=  # Optional, not needed for basic auth
 │  └────────────┘ └────────────┘ └────────────┘ └────────────┘  │
 │         All reference: SharedLayer (intelliprocess-shared)       │
 │                                                                  │
-│  S3: intelliprocess-docs-dev-{accountId}                        │
-│  DynamoDB: 5 tables (on-demand, encrypted)                      │
+│  S3: intelliprocess-ai-documents                                │
+│  DynamoDB: 6 tables (on-demand, encrypted; incl. AppConfig)     │
 │  Cognito: IntelliProcess-Users-dev (4 groups)                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -767,7 +810,7 @@ if [ "$confirmation" != "yes" ]; then
 fi
 
 # Empty S3 bucket (required before stack deletion)
-aws s3 rm s3://intelliprocess-docs-dev-$(aws sts get-caller-identity --query Account --output text) --recursive
+aws s3 rm s3://intelliprocess-ai-documents --recursive
 
 # Delete CloudFormation stack
 aws cloudformation delete-stack --stack-name intelliprocess-dev
@@ -802,9 +845,9 @@ echo "Cleanup complete."
 - [ ] `sam deploy` completes (stack CREATE_COMPLETE)
 - [ ] Note API URL from stack outputs
 - [ ] Create Bedrock Knowledge Base (console)
-- [ ] Create BDA project + blueprint (console)
+- [ ] BDA: no setup required — extraction uses the AWS-managed **public invoice blueprint**; no custom project/blueprint to create
 - [ ] Create Guardrails (console)
-- [ ] Update samconfig.toml with KB/BDA/Guardrail IDs
+- [ ] Update samconfig.toml with KB/Guardrail IDs (BDA_PROJECT_ARN optional; unused by the public-blueprint path)
 - [ ] Re-deploy with updated parameters: `sam deploy`
 - [ ] Create Cognito test users (4 roles)
 - [ ] Run seed_data.py (POs and GRs)

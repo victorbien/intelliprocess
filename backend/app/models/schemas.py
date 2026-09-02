@@ -563,3 +563,53 @@ class ApprovalSettings(BaseModel):
     gr_qty_tolerance: float = Field(..., alias="grQtyTolerance", ge=0.0, le=1.0)
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Admin: Upload-and-extract (PO / GR) ──────────────────────────────────────
+
+
+class ExtractPending(BaseModel):
+    """202 response for the sync-then-async extract flow.
+
+    Returned when extraction did not finish within the synchronous window.
+    The client polls GET .../extract/status?jobId=<jobId> until it resolves.
+    """
+
+    status: str = "pending"
+    job_id: str = Field(..., alias="jobId")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class PurchaseOrderExtractResponse(BaseModel):
+    """Extracted PO candidate fields from an uploaded document (not persisted).
+
+    All fields are optional because extraction may not find every value; the
+    admin reviews and edits the pre-filled form before saving via
+    POST /purchase-orders/upload.
+    """
+
+    status: str = "complete"
+    po_number: str | None = Field(None, alias="poNumber")
+    vendor_name: str | None = Field(None, alias="vendorName")
+    total_amount: float | None = Field(None, alias="totalAmount")
+    overall_confidence: float | None = Field(None, alias="overallConfidence")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class GoodsReceiptExtractResponse(BaseModel):
+    """Extracted GR candidate fields from an uploaded document (not persisted).
+
+    All fields are optional because extraction may not find every value; the
+    admin reviews and edits the pre-filled form before saving via
+    POST /goods-receipts/upload.
+    """
+
+    status: str = "complete"
+    gr_id: str | None = Field(None, alias="grId")
+    po_number: str | None = Field(None, alias="poNumber")
+    total_quantity_received: float | None = Field(None, alias="totalQuantityReceived")
+    overall_confidence: float | None = Field(None, alias="overallConfidence")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}

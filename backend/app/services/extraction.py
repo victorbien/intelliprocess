@@ -99,6 +99,16 @@ class ExtractionError(Exception):
         self.retryable = retryable
 
 
+class ExtractionTimeout(Exception):
+    """Raised when a bounded extraction wait elapses while the BDA job is still
+    running. Carries the ``invocation_arn`` so the caller can resume polling
+    asynchronously (sync-then-async fallback for the admin upload endpoints)."""
+
+    def __init__(self, invocation_arn: str):
+        super().__init__("Extraction still in progress")
+        self.invocation_arn = invocation_arn
+
+
 def extract_invoice(bucket: str, s3_key: str) -> dict[str, Any]:
     """Extract invoice fields from an S3 object using BDA.
 
@@ -121,6 +131,167 @@ def extract_invoice(bucket: str, s3_key: str) -> dict[str, Any]:
         return _mock_extraction(s3_key)
 
     return _bda_extract(bucket, s3_key)
+
+
+# Sentinel ARN prefix used when USE_MOCKS is on, so the async poll/finalize
+# path can recognise a mock job and return canned data without calling AWS.
+_MOCK_ARN_PREFIX = "mock-invocation:"
+
+
+def start_bda_job(
+    file_bytes: bytes,
+    filename: str,
+    prefix: str,
+    content_type: str = "application/pdf",
+) -> str:
+    """Upload the document and start an async BDA job. Returns the invocation ARN.
+
+    The invocation ARN is the only handle needed to poll and finalise later, so
+    it doubles as the async job token for the sync-then-async upload flow.
+    """
+    import uuid as _uuid
+
+    from app.services.s3 import S3Client
+
+    s3_key = f"{prefix}/{_uuid.uuid4()}/{filename}"
+
+    if settings.USE_MOCKS:
+        logger.info("USE_MOCKS=true - mock BDA job started", extra={"s3Key": s3_key})
+        return f"{_MOCK_ARN_PREFIX}{s3_key}"
+
+    s3 = S3Client()
+    s3.upload_bytes(s3_key, file_bytes, content_type)
+
+    runtime = boto3.client(
+        "bedrock-data-automation-runtime", region_name=settings.AWS_REGION
+    )
+    s3_input_uri = f"s3://{s3.bucket}/{s3_key}"
+    s3_output_uri = f"s3://{s3.bucket}/{_BDA_OUTPUT_PREFIX}{s3_key}"
+
+    logger.info(
+        "Starting BDA extraction",
+        extra={"s3Input": s3_input_uri, "blueprint": _BDA_INVOICE_BLUEPRINT_ARN},
+    )
+    try:
+        response = runtime.invoke_data_automation_async(
+            inputConfiguration={"s3Uri": s3_input_uri},
+            outputConfiguration={"s3Uri": s3_output_uri},
+            dataAutomationProfileArn=_bda_profile_arn(),
+            blueprints=[{"blueprintArn": _BDA_INVOICE_BLUEPRINT_ARN, "stage": "LIVE"}],
+        )
+    except ClientError as exc:
+        raise ExtractionError(
+            f"Failed to start BDA job: {exc.response['Error']['Message']}"
+        ) from exc
+
+    invocation_arn = response["invocationArn"]
+    logger.info("BDA job started", extra={"invocationArn": invocation_arn})
+    return invocation_arn
+
+
+def poll_bda_status(invocation_arn: str) -> str:
+    """Return a coarse job status: 'InProgress' | 'Success' | 'Failed'.
+
+    Non-blocking (single status call, no sleep). Raises ExtractionError only for
+    an unexpected API failure; a failed BDA job is reported as 'Failed'.
+    """
+    if invocation_arn.startswith(_MOCK_ARN_PREFIX):
+        return "Success"
+
+    runtime = boto3.client(
+        "bedrock-data-automation-runtime", region_name=settings.AWS_REGION
+    )
+    try:
+        resp = runtime.get_data_automation_status(invocationArn=invocation_arn)
+    except ClientError as exc:
+        raise ExtractionError(
+            f"BDA status poll failed: {exc.response['Error']['Message']}"
+        ) from exc
+
+    status = resp.get("status", "")
+    if status == "Success":
+        return "Success"
+    if status in ("ServiceError", "ClientError"):
+        return "Failed"
+    return "InProgress"
+
+
+def finalize_bda_job(invocation_arn: str) -> dict[str, Any]:
+    """Read + parse the result of a completed BDA job. Assumes status == Success.
+
+    Returns the same normalised extraction dict as ``extract_invoice``.
+    """
+    if invocation_arn.startswith(_MOCK_ARN_PREFIX):
+        s3_key = invocation_arn[len(_MOCK_ARN_PREFIX):]
+        return _mock_extraction(s3_key)
+
+    from app.services.s3 import S3Client
+
+    bucket = S3Client().bucket
+    runtime = boto3.client(
+        "bedrock-data-automation-runtime", region_name=settings.AWS_REGION
+    )
+    try:
+        status_resp = runtime.get_data_automation_status(invocationArn=invocation_arn)
+    except ClientError as exc:
+        raise ExtractionError(
+            f"BDA status read failed: {exc.response['Error']['Message']}"
+        ) from exc
+
+    meta_uri = status_resp.get("outputConfiguration", {}).get("s3Uri", "")
+    inference = _read_bda_custom_output(bucket, meta_uri)
+    extraction = _parse_bda_response(inference)
+    _validate_extraction_result(extraction)
+    logger.info(
+        "BDA extraction complete",
+        extra={
+            "invocationArn": invocation_arn,
+            "overallConfidence": extraction.get("overallConfidence"),
+            "vendor": extraction.get("vendorName"),
+        },
+    )
+    return extraction
+
+
+def extract_from_bytes(
+    file_bytes: bytes,
+    filename: str,
+    prefix: str,
+    content_type: str = "application/pdf",
+    timeout_s: float | None = None,
+) -> dict[str, Any]:
+    """Extract invoice-shaped fields from an uploaded document.
+
+    Starts a BDA job and waits for it. If ``timeout_s`` is given and elapses
+    while the job is still running, raises ``ExtractionTimeout`` (carrying the
+    invocation ARN) so the caller can hand the job off to async polling.
+
+    Reused by the admin PO/GR upload endpoints (Option A: the invoice blueprint
+    also captures vendor / id / total, which map onto PO and GR fields).
+    """
+    # Start the deadline clock BEFORE the upload/invoke so the whole operation
+    # (upload + STS + invoke + polling) fits within timeout_s — keeping the HTTP
+    # response comfortably under the API Gateway 29s ceiling.
+    deadline = None if timeout_s is None else (time.monotonic() + timeout_s)
+
+    invocation_arn = start_bda_job(file_bytes, filename, prefix, content_type)
+
+    for _ in range(_BDA_MAX_POLLS):
+        status = poll_bda_status(invocation_arn)
+        if status == "Success":
+            return finalize_bda_job(invocation_arn)
+        if status == "Failed":
+            raise ExtractionError("BDA job failed", retryable=True)
+        # Bail out to async BEFORE sleeping again if the next poll cycle would
+        # risk exceeding the budget (leaves margin for finalize + response).
+        if deadline is not None and time.monotonic() + _BDA_POLL_INTERVAL_S >= deadline:
+            raise ExtractionTimeout(invocation_arn)
+        time.sleep(_BDA_POLL_INTERVAL_S)
+
+    raise ExtractionError(
+        f"BDA job timed out after {_BDA_MAX_POLLS * _BDA_POLL_INTERVAL_S}s",
+        retryable=True,
+    )
 
 
 # ── BDA implementation ────────────────────────────────────────────────────────

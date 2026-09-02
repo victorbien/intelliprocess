@@ -10,12 +10,101 @@
  *  - Upload a structured Goods Receipt
  */
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import DocumentUpload from "@/components/admin/DocumentUpload";
 import { adminApi, documentsApi } from "@/services/api";
 import { ApiError, type ApprovalSettings } from "@/services/types";
 import { logger } from "@/services/logger";
+
+/** Small inline spinner. */
+function Spinner({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      className={`h-4 w-4 animate-spin text-indigo-600 ${className}`}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+    </svg>
+  );
+}
+
+/**
+ * "Upload a document to auto-fill the form" dropzone.
+ *
+ * While `busy`, the control is fully locked: no new file can be selected, and
+ * a progress indicator replaces the picker so the wait reads as intentional.
+ */
+function ExtractUpload({
+  heading,
+  busy,
+  fileName,
+  onFile,
+}: {
+  heading: string;
+  busy: boolean;
+  fileName: string | null;
+  onFile: (file: File) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <div
+      className={`mb-4 rounded-lg border border-dashed p-3 transition-colors ${
+        busy ? "border-indigo-200 bg-indigo-50/40" : "border-slate-300 bg-slate-50"
+      }`}
+    >
+      <p className="mb-2 flex items-center gap-1.5 text-xs font-medium text-slate-600">
+        <svg className="h-3.5 w-3.5 text-slate-400" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path d="M10 3a1 1 0 01.7.3l3 3a1 1 0 01-1.4 1.4L11 5.4V13a1 1 0 11-2 0V5.4L7.7 7.7a1 1 0 01-1.4-1.4l3-3A1 1 0 0110 3z" />
+          <path d="M4 14a1 1 0 011 1v1h10v-1a1 1 0 112 0v2a1 1 0 01-1 1H4a1 1 0 01-1-1v-2a1 1 0 011-1z" />
+        </svg>
+        {heading}
+      </p>
+
+      {busy ? (
+        <div className="flex items-center gap-2 rounded-md bg-white/70 px-3 py-2">
+          <Spinner />
+          <div className="min-w-0">
+            <p className="truncate text-xs font-medium text-slate-700">
+              Extracting{fileName ? ` from "${fileName}"` : ""}…
+            </p>
+            <p className="text-[11px] text-slate-400">This can take up to ~30 seconds. Please wait.</p>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => inputRef.current?.click()}
+              className="shrink-0 rounded-md bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 transition hover:bg-indigo-100"
+            >
+              Choose file…
+            </button>
+            <span className="truncate text-xs text-slate-500">
+              {fileName ? fileName : "PDF, PNG, or JPEG"}
+            </span>
+          </div>
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) onFile(f);
+              e.target.value = ""; // allow re-selecting the same file
+            }}
+          />
+        </>
+      )}
+    </div>
+  );
+}
 
 type Feedback = { tone: "ok" | "err"; text: string } | null;
 
@@ -84,6 +173,35 @@ export default function AdminPage() {
   const [po, setPo] = useState({ poNumber: "", vendorName: "", totalAmount: "" });
   const [poBusy, setPoBusy] = useState(false);
   const [poMsg, setPoMsg] = useState<Feedback>(null);
+  const [poExtracting, setPoExtracting] = useState(false);
+  const [poFileName, setPoFileName] = useState<string | null>(null);
+  const poLocked = poExtracting || poBusy;
+
+  const extractPo = async (file: File) => {
+    if (poLocked) return; // guard against concurrent uploads while busy
+    setPoExtracting(true);
+    setPoFileName(file.name);
+    setPoMsg(null);
+    try {
+      const res = await adminApi.extractPurchaseOrder(file);
+      setPo({
+        poNumber: res.poNumber ?? "",
+        vendorName: res.vendorName ?? "",
+        totalAmount: res.totalAmount != null ? String(res.totalAmount) : "",
+      });
+      const conf = res.overallConfidence != null ? ` · ${Math.round(res.overallConfidence * 100)}% confidence` : "";
+      const filled = [res.poNumber, res.vendorName, res.totalAmount].filter((v) => v != null && v !== "").length;
+      if (filled === 0) {
+        setPoMsg({ tone: "err", text: "No fields could be read from that document. Enter the details manually." });
+      } else {
+        setPoMsg({ tone: "ok", text: `Auto-filled ${filled} of 3 fields${conf}. Review and edit before saving.` });
+      }
+    } catch (err) {
+      setPoMsg({ tone: "err", text: err instanceof ApiError ? err.message : "Extraction failed." });
+    } finally {
+      setPoExtracting(false);
+    }
+  };
 
   const submitPo = async () => {
     const amount = Number(po.totalAmount);
@@ -112,6 +230,35 @@ export default function AdminPage() {
   const [gr, setGr] = useState({ grId: "", poNumber: "", totalQuantityReceived: "" });
   const [grBusy, setGrBusy] = useState(false);
   const [grMsg, setGrMsg] = useState<Feedback>(null);
+  const [grExtracting, setGrExtracting] = useState(false);
+  const [grFileName, setGrFileName] = useState<string | null>(null);
+  const grLocked = grExtracting || grBusy;
+
+  const extractGr = async (file: File) => {
+    if (grLocked) return; // guard against concurrent uploads while busy
+    setGrExtracting(true);
+    setGrFileName(file.name);
+    setGrMsg(null);
+    try {
+      const res = await adminApi.extractGoodsReceipt(file);
+      setGr({
+        grId: res.grId ?? "",
+        poNumber: res.poNumber ?? "",
+        totalQuantityReceived: res.totalQuantityReceived != null ? String(res.totalQuantityReceived) : "",
+      });
+      const conf = res.overallConfidence != null ? ` · ${Math.round(res.overallConfidence * 100)}% confidence` : "";
+      const filled = [res.grId, res.poNumber, res.totalQuantityReceived].filter((v) => v != null && v !== "").length;
+      if (filled === 0) {
+        setGrMsg({ tone: "err", text: "No fields could be read from that document. Enter the details manually." });
+      } else {
+        setGrMsg({ tone: "ok", text: `Auto-filled ${filled} of 3 fields${conf}. Review and edit before saving.` });
+      }
+    } catch (err) {
+      setGrMsg({ tone: "err", text: err instanceof ApiError ? err.message : "Extraction failed." });
+    } finally {
+      setGrExtracting(false);
+    }
+  };
 
   const submitGr = async () => {
     const qty = Number(gr.totalQuantityReceived);
@@ -311,7 +458,13 @@ export default function AdminPage() {
         </Card>
 
         <Card title="Upload purchase order" description="Store a structured PO for three-way matching.">
-          <div className="space-y-2">
+          <ExtractUpload
+            heading="Upload a PO document to auto-fill the fields — or enter them manually below."
+            busy={poExtracting}
+            fileName={poFileName}
+            onFile={(f) => void extractPo(f)}
+          />
+          <fieldset disabled={poLocked} className="space-y-2 disabled:opacity-60">
             <label className="block">
               <span className="text-xs font-medium text-slate-600">PO number</span>
               <input
@@ -339,15 +492,22 @@ export default function AdminPage() {
                 onChange={(e) => setPo({ ...po, totalAmount: e.target.value })}
               />
             </label>
-            <button type="button" disabled={poBusy} onClick={() => void submitPo()} className={btnCls}>
+            <button type="button" disabled={poLocked} onClick={() => void submitPo()} className={`${btnCls} inline-flex items-center gap-2`}>
+              {poBusy && <Spinner className="text-white" />}
               {poBusy ? "Saving…" : "Save purchase order"}
             </button>
-            <FeedbackLine feedback={poMsg} />
-          </div>
+          </fieldset>
+          <FeedbackLine feedback={poMsg} />
         </Card>
 
         <Card title="Upload goods receipt" description="Link a GR to an existing PO for three-way matching.">
-          <div className="space-y-2">
+          <ExtractUpload
+            heading="Upload a GR document to auto-fill the fields — or enter them manually below."
+            busy={grExtracting}
+            fileName={grFileName}
+            onFile={(f) => void extractGr(f)}
+          />
+          <fieldset disabled={grLocked} className="space-y-2 disabled:opacity-60">
             <label className="block">
               <span className="text-xs font-medium text-slate-600">GR id</span>
               <input
@@ -375,11 +535,12 @@ export default function AdminPage() {
                 onChange={(e) => setGr({ ...gr, totalQuantityReceived: e.target.value })}
               />
             </label>
-            <button type="button" disabled={grBusy} onClick={() => void submitGr()} className={btnCls}>
+            <button type="button" disabled={grLocked} onClick={() => void submitGr()} className={`${btnCls} inline-flex items-center gap-2`}>
+              {grBusy && <Spinner className="text-white" />}
               {grBusy ? "Saving…" : "Save goods receipt"}
             </button>
-            <FeedbackLine feedback={grMsg} />
-          </div>
+          </fieldset>
+          <FeedbackLine feedback={grMsg} />
         </Card>
       </div>
     </div>

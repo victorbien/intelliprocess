@@ -215,6 +215,30 @@ export interface ApprovalSettings {
   grQtyTolerance: number;
 }
 
+/** Candidate PO fields extracted from an uploaded document (POST /purchase-orders/extract). */
+export interface PurchaseOrderExtract {
+  status?: string; // "complete"
+  poNumber?: string | null;
+  vendorName?: string | null;
+  totalAmount?: number | null;
+  overallConfidence?: number | null;
+}
+
+/** Candidate GR fields extracted from an uploaded document (POST /goods-receipts/extract). */
+export interface GoodsReceiptExtract {
+  status?: string; // "complete"
+  grId?: string | null;
+  poNumber?: string | null;
+  totalQuantityReceived?: number | null;
+  overallConfidence?: number | null;
+}
+
+/** 202 pending response for the sync-then-async extract flow. */
+export interface ExtractPending {
+  status: "pending";
+  jobId: string;
+}
+
 // ─── Client-side error ──────────────────────────────────────────────────────
 
 /** Normalized error surfaced to UI components. */

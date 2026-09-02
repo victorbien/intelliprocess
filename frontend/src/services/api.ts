@@ -18,8 +18,11 @@ import {
   type DocumentListItem,
   type DocumentUploadResponse,
   type ApprovalSettings,
+  type ExtractPending,
+  type GoodsReceiptExtract,
   type GoodsReceiptUploadResponse,
   type InvoiceApproveResponse,
+  type PurchaseOrderExtract,
   type InvoiceDetail,
   type InvoiceListItem,
   type InvoiceUploadResponse,
@@ -111,6 +114,54 @@ async function put<T>(url: string, body?: unknown): Promise<T> {
   } catch (err) {
     throw normalizeError(err);
   }
+}
+
+/** POST multipart/form-data (file uploads). Lets the browser set the boundary. */
+async function postForm<T>(url: string, form: FormData): Promise<T> {
+  try {
+    const res = await http.post<ApiSuccess<T>>(url, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+    return unwrap<T>(res.data);
+  } catch (err) {
+    throw normalizeError(err);
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Upload a file and resolve to the extracted fields, transparently handling the
+ * sync-then-async flow: the start endpoint returns either the fields (complete)
+ * or `{ status: "pending", jobId }` (HTTP 202), in which case we poll the status
+ * endpoint until the job resolves.
+ */
+async function extractWithPolling<T extends { status?: string }>(
+  startUrl: string,
+  statusUrl: string,
+  file: File,
+  { intervalMs = 3000, maxAttempts = 60 } = {},
+): Promise<T> {
+  const form = new FormData();
+  form.append("file", file);
+  const first = await postForm<T | ExtractPending>(startUrl, form);
+
+  if ((first as ExtractPending).status !== "pending") {
+    return first as T;
+  }
+
+  let jobId = (first as ExtractPending).jobId;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await sleep(intervalMs);
+    const res = await get<T | ExtractPending>(
+      `${statusUrl}?jobId=${encodeURIComponent(jobId)}`,
+    );
+    if ((res as ExtractPending).status !== "pending") {
+      return res as T;
+    }
+    jobId = (res as ExtractPending).jobId ?? jobId;
+  }
+  throw new ApiError("Extraction timed out. Please try again.", 0, "EXTRACT_TIMEOUT");
 }
 
 // ─── Presigned S3 upload helper ───────────────────────────────────────────────
@@ -224,6 +275,18 @@ export const adminApi = {
   getSettings: () => get<ApprovalSettings>("/admin/settings"),
   updateSettings: (body: ApprovalSettings) =>
     put<ApprovalSettings>("/admin/settings", body),
+  extractPurchaseOrder: (file: File) =>
+    extractWithPolling<PurchaseOrderExtract>(
+      "/purchase-orders/extract",
+      "/purchase-orders/extract/status",
+      file,
+    ),
+  extractGoodsReceipt: (file: File) =>
+    extractWithPolling<GoodsReceiptExtract>(
+      "/goods-receipts/extract",
+      "/goods-receipts/extract/status",
+      file,
+    ),
 };
 
 // ─── Records Assistant (chat) — streaming, citations, session summary ─────────

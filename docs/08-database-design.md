@@ -41,6 +41,7 @@
 | IntelliProcess-GoodsReceipts | GR reference data for matching | On-demand | AWS-managed |
 | IntelliProcess-Conversations | Chat session history | On-demand | AWS-managed |
 | IntelliProcess-Documents | General document metadata (records) | On-demand | AWS-managed |
+| IntelliProcess-AppConfig | Admin-configurable approval settings (singleton) | On-demand | AWS-managed |
 
 ---
 
@@ -146,8 +147,8 @@
     "decision": "APPROVED",
     "approver": "SYSTEM",
     "approvedAt": "2026-07-25T10:30:28Z",
-    "rulesEvaluated": ["RULE-001", "RULE-002", "RULE-003", "RULE-004"],
-    "rulesPassed": ["RULE-001", "RULE-002", "RULE-003", "RULE-004"]
+    "rulesEvaluated": ["RULE-001", "RULE-002", "RULE-003"],
+    "rulesPassed": ["RULE-001", "RULE-002", "RULE-003"]
   },
   "processingDurationMs": 28000
 }
@@ -348,33 +349,76 @@
 
 ---
 
+### 3.6 App Config Table
+
+**Table Name**: `IntelliProcess-AppConfig`
+
+Stores admin-configurable approval/matching thresholds as a **singleton** record.
+Read by the invoice processing pipeline on each run (falling back to built-in
+defaults when absent) and managed via the `GET`/`PUT /admin/settings` endpoints.
+
+| Attribute | Type | Key | Description |
+|-----------|------|-----|-------------|
+| configKey | String | PK (Hash) | Fixed value `"APPROVAL_SETTINGS"` for the singleton record |
+| amountThreshold | Number | - | Invoice auto-approval ceiling in USD (default 10000) |
+| confidenceThreshold | Number | - | Minimum overall extraction confidence to auto-approve, 0.0–1.0 (default 0.85) |
+| poAmountTolerance | Number | - | Three-way match PO amount margin, 0.0–1.0 (default 0.05; 0 = exact) |
+| grQtyTolerance | Number | - | Three-way match GR quantity margin, 0.0–1.0 (default 0.02; 0 = exact) |
+
+No GSIs (single-item, direct `get_item`/`put_item` by `configKey`). `DeletionPolicy: Retain`.
+
+**Example Item:**
+
+```json
+{
+  "configKey": "APPROVAL_SETTINGS",
+  "amountThreshold": 10000,
+  "confidenceThreshold": 0.85,
+  "poAmountTolerance": 0.05,
+  "grQtyTolerance": 0.02
+}
+```
+
+---
+
 ## 4. S3 Bucket Design
 
 ### 4.1 Bucket Structure
 
-**Bucket Name**: `intelliprocess-documents-{stage}-{account-id}`
+**Bucket Name**: `intelliprocess-ai-documents`
+
+> Note: The bucket uses a fixed name (`intelliprocess-ai-documents`), not a
+> stage/account-suffixed name. It is defined with `DeletionPolicy: Retain` and
+> was adopted into the stack via CloudFormation resource import.
 
 ```
-intelliprocess-documents-dev-123456789012/
+intelliprocess-ai-documents/
 ├── invoices/
 │   └── {documentId}/
-│       └── {originalFileName}
-├── purchase-orders/
-│   └── {documentId}/
-│       └── {originalFileName}
-├── goods-receipts/
-│   └── {documentId}/
-│       └── {originalFileName}
-└── records/
-    └── {documentId}/
-        └── {originalFileName}
+│       └── {originalFileName}        # invoice uploads (triggers processing)
+├── records/
+│   └── knowledge-base/
+│       └── {originalFileName}        # KB documents
+├── po-uploads/
+│   └── {uuid}/
+│       └── {originalFileName}        # admin PO document upload-and-extract
+├── gr-uploads/
+│   └── {uuid}/
+│       └── {originalFileName}        # admin GR document upload-and-extract
+└── bda-output/
+    └── {inputKey}/...               # Bedrock Data Automation output (invoice + PO/GR extract)
 ```
+
+> Note: Purchase Orders and Goods Receipts are stored as **structured records in
+> DynamoDB** (via `/purchase-orders/upload` and `/goods-receipts/upload`), not as
+> files. The `po-uploads/`/`gr-uploads/` prefixes only hold documents temporarily
+> uploaded for the optional BDA field-extraction (auto-fill) flow.
 
 ### 4.2 Bucket Configuration
 
 ```yaml
 Properties:
-  BucketName: !Sub "intelliprocess-documents-${Stage}-${AWS::AccountId}"
+  BucketName: "intelliprocess-ai-documents"
   BucketEncryption:
     ServerSideEncryptionConfiguration:
       - ServerSideEncryptionByDefault:
@@ -443,6 +487,13 @@ Properties:
 | 1 | Get conversation messages | PK = sessionId, SK between timestamps | Table | High |
 | 2 | Get last 5 messages | PK = sessionId, SK desc, limit 5 | Table | High |
 | 3 | List user sessions | PK = userId | GSI-UserSessions | Low |
+
+### 5.5 App Config Access Patterns
+
+| # | Access Pattern | Key Condition | Index | Frequency |
+|---|---------------|---------------|-------|-----------|
+| 1 | Read approval settings | PK = "APPROVAL_SETTINGS" | Table | Medium (once per invoice run) |
+| 2 | Update approval settings | PK = "APPROVAL_SETTINGS" | Table | Low (admin action) |
 
 ---
 
@@ -657,6 +708,20 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
+
+  AppConfigTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "IntelliProcess-AppConfig-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: configKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: configKey
+          KeyType: HASH
 ```
 
 ---
@@ -680,13 +745,12 @@ SAMPLE_GRS = [
     # ... matching GRs for POs
 ]
 
-APPROVED_VENDORS = [
-    "Acme Office Supplies Inc.",
-    "TechParts Global Ltd.",
-    "Facilities Maintenance Co.",
-    "CloudServ Solutions",
-    "PrintWorks Inc."
-]
 ```
 
 This seed data ensures the demo can show successful matches, partial matches, and no-match scenarios.
+
+> Note: An approved-vendor allow-list was part of an earlier design (approval
+> RULE-004) but has since been **removed** — vendor membership no longer gates
+> auto-approval. See Functional Requirements (FR-AP-006) and Component Design
+> (Rules Engine). The seed script (`scripts/seed_data.py`) loads sample POs and
+> GRs only.

@@ -47,7 +47,7 @@ Both capabilities share a common document ingestion pipeline, authentication lay
 | Timeline | 3 weeks (15 working days) |
 | Team | University student team (3-5 members) |
 | Budget | AWS Free Tier + limited educational credits |
-| Environment | AWS Cloud (single region: us-east-1) |
+| Environment | AWS Cloud (single region; **deployed in `ap-southeast-2`** — earlier docs reference `us-east-1` as a placeholder in example URLs/ARNs) |
 | Authentication | Simplified (API key or Cognito basic) |
 
 ---
@@ -83,7 +83,7 @@ IntelliProcess AI is a greenfield cloud-native application. It does not integrat
 
 ### 2.4 Operating Environment
 
-- **Cloud Provider**: AWS (us-east-1)
+- **Cloud Provider**: AWS (deployed in `ap-southeast-2`)
 - **Runtime**: Serverless (Lambda, API Gateway)
 - **AI Foundation**: Amazon Bedrock (Claude 3.x models)
 - **Document Processing**: Bedrock Data Automation
@@ -111,7 +111,7 @@ IntelliProcess AI is a greenfield cloud-native application. It does not integrat
 
 **Dependencies:**
 - Amazon Bedrock model access (Claude 3 Sonnet/Haiku)
-- Bedrock Data Automation availability in us-east-1
+- Bedrock Data Automation availability in the deployment region (`ap-southeast-2`)
 - AWS AgentCore GA availability
 - Bedrock Knowledge Bases for RAG
 

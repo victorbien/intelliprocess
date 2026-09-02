@@ -23,6 +23,49 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+function humanizeRole(role?: string): string {
+  const map: Record<string, string> = {
+    AP_CLERK: "AP Clerk",
+    FINANCE_MANAGER: "Finance Manager",
+    ADMIN: "Administrator",
+    STAFF: "Staff",
+  };
+  return map[String(role ?? "")] ?? String(role ?? "—");
+}
+
+function formatDateTime(value?: string): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString("en-AU", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** Coloured pill for the automated/manual approval decision. */
+function DecisionBadge({ decision }: { decision?: string }) {
+  const d = String(decision ?? "").toUpperCase();
+  const label =
+    d === "APPROVE" || d === "APPROVED"
+      ? "Approved"
+      : d === "REJECT" || d === "REJECTED"
+        ? "Rejected"
+        : d === "ESCALATE" || d === "ESCALATED"
+          ? "Escalated"
+          : decision || "—";
+  const tone =
+    d.startsWith("APPROV")
+      ? "bg-green-100 text-green-700"
+      : d.startsWith("REJECT")
+        ? "bg-red-100 text-red-700"
+        : "bg-amber-100 text-amber-800";
+  return <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${tone}`}>{label}</span>;
+}
+
 export default function InvoiceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { hasRole } = useAuth();
@@ -67,14 +110,20 @@ export default function InvoiceDetailPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <Link to="/invoices" className="text-sm text-indigo-600 hover:underline">
-            ← Back to invoices
-          </Link>
-          <h1 className="mt-1 text-xl font-semibold text-slate-800">{invoice.fileName}</h1>
+      <div>
+        <Link to="/invoices" className="text-sm text-indigo-600 hover:underline">
+          ← Back to invoices
+        </Link>
+        <div className="mt-1 flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="break-words text-xl font-semibold text-slate-800">{invoice.fileName}</h1>
+            <p className="mt-1 text-xs text-slate-400">
+              Uploaded by {invoice.uploadedBy}
+              {invoice.uploadedAt && <> · {formatDateTime(invoice.uploadedAt)}</>}
+            </p>
+          </div>
+          <StatusBadge status={invoice.status} />
         </div>
-        <StatusBadge status={invoice.status} />
       </div>
 
       {invoice.errorDetails && (
@@ -99,30 +148,44 @@ export default function InvoiceDetailPage() {
 
           {decision && (
             <Section title="Approval decision">
-              <dl className="space-y-1 text-sm">
-                <div className="flex justify-between">
-                  <dt className="text-slate-500">Decision</dt>
-                  <dd className="font-medium text-slate-800">{decision.decision ?? "—"}</dd>
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <DecisionBadge decision={decision.decision} />
+                  {decision.escalateTo && (
+                    <span className="text-xs text-slate-500">
+                      to <span className="font-medium text-slate-700">{humanizeRole(decision.escalateTo)}</span>
+                    </span>
+                  )}
                 </div>
-                {decision.approver && (
-                  <div className="flex justify-between">
-                    <dt className="text-slate-500">By</dt>
-                    <dd className="text-slate-700">{decision.approver}</dd>
-                  </div>
-                )}
-                {decision.reason && (
-                  <div className="flex justify-between">
-                    <dt className="text-slate-500">Reason</dt>
-                    <dd className="text-slate-700">{decision.reason}</dd>
-                  </div>
-                )}
-                {decision.comment && (
-                  <div className="flex justify-between">
-                    <dt className="text-slate-500">Comment</dt>
-                    <dd className="text-slate-700">{decision.comment}</dd>
-                  </div>
-                )}
-              </dl>
+
+                <dl className="space-y-2 text-sm">
+                  {decision.reason && (
+                    <div>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">Reason</dt>
+                      <dd className="mt-0.5 text-slate-700">{decision.reason}</dd>
+                    </div>
+                  )}
+                  {decision.comment && (
+                    <div>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">Comment</dt>
+                      <dd className="mt-0.5 text-slate-700">{decision.comment}</dd>
+                    </div>
+                  )}
+                  {(decision.approver || decision.approvedAt) && (
+                    <div>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                        Reviewed by
+                      </dt>
+                      <dd className="mt-0.5 text-slate-700">
+                        {decision.approver ?? "—"}
+                        {decision.approvedAt && (
+                          <span className="text-slate-400"> · {formatDateTime(decision.approvedAt)}</span>
+                        )}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+              </div>
             </Section>
           )}
 
@@ -131,9 +194,10 @@ export default function InvoiceDetailPage() {
               href={invoice.documentUrl}
               target="_blank"
               rel="noreferrer"
-              className="inline-block rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-indigo-600 hover:bg-slate-50"
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-indigo-600 transition hover:bg-slate-50"
             >
-              View original document ↗
+              View original document
+              <span aria-hidden>↗</span>
             </a>
           )}
         </div>

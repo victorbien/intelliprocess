@@ -226,15 +226,24 @@ def match_goods_receipt(po_number: str, invoiced_quantity: int) -> dict:
 
 ``` python
 # tools/evaluate_rules.py
-AMOUNT_THRESHOLD = 10000.00
-CONFIDENCE_THRESHOLD = 0.85
-APPROVED_VENDORS = ["Acme Office Supplies Inc.", "TechParts Global Ltd.", 
-                    "Facilities Maintenance Co.", "CloudServ Solutions", "PrintWorks Inc."]
+#
+# Thresholds are admin-configurable and loaded from the AppConfig table
+# (APPROVAL_SETTINGS) at evaluation time; the values below are the defaults
+# used when no override is stored.
+DEFAULT_AMOUNT_THRESHOLD = 10000.00
+DEFAULT_CONFIDENCE_THRESHOLD = 0.85
 
 def evaluate_approval_rules(total_amount: float, overall_confidence: float,
                            vendor_name: str, three_way_match_status: str,
-                           discrepancies: list) -> dict:
-    """Evaluate all approval rules and return decision."""
+                           discrepancies: list,
+                           amount_threshold: float = DEFAULT_AMOUNT_THRESHOLD,
+                           confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD) -> dict:
+    """Evaluate all approval rules and return decision.
+
+    NOTE: The former RULE-004 (approved-vendor allow-list) has been REMOVED.
+    vendor_name is still accepted for PO matching and logging, but it no longer
+    gates approval.
+    """
     
     rules_results = []
     
@@ -246,28 +255,20 @@ def evaluate_approval_rules(total_amount: float, overall_confidence: float,
         "detail": f"Match status: {three_way_match_status}"
     })
     
-    # Rule 2: Amount threshold
-    rule2_pass = total_amount <= AMOUNT_THRESHOLD
+    # Rule 2: Amount threshold (configurable)
+    rule2_pass = total_amount <= amount_threshold
     rules_results.append({
         "ruleId": "RULE-002", "name": "Amount Threshold",
         "passed": rule2_pass,
-        "detail": f"Amount ${total_amount:.2f} vs threshold ${AMOUNT_THRESHOLD:.2f}"
+        "detail": f"Amount ${total_amount:.2f} vs threshold ${amount_threshold:.2f}"
     })
     
-    # Rule 3: Confidence threshold
-    rule3_pass = overall_confidence >= CONFIDENCE_THRESHOLD
+    # Rule 3: Confidence threshold (configurable)
+    rule3_pass = overall_confidence >= confidence_threshold
     rules_results.append({
         "ruleId": "RULE-003", "name": "Confidence Threshold",
         "passed": rule3_pass,
-        "detail": f"Confidence {overall_confidence:.2f} vs threshold {CONFIDENCE_THRESHOLD}"
-    })
-    
-    # Rule 4: Approved vendor
-    rule4_pass = vendor_name in APPROVED_VENDORS
-    rules_results.append({
-        "ruleId": "RULE-004", "name": "Approved Vendor",
-        "passed": rule4_pass,
-        "detail": f"Vendor '{vendor_name}' {'is' if rule4_pass else 'is NOT'} in approved list"
+        "detail": f"Confidence {overall_confidence:.2f} vs threshold {confidence_threshold}"
     })
     
     # Decision logic
@@ -279,21 +280,16 @@ def evaluate_approval_rules(total_amount: float, overall_confidence: float,
             "rulesResults": rules_results
         }
     
-    # Find first failing rule for escalation routing
-    failed = next(r for r in rules_results if not r["passed"])
-    
+    # Route escalation by highest-priority failing rule
     if not rule2_pass:
         escalate_to = "FINANCE_MANAGER"
-        reason = f"Amount ${total_amount:.2f} exceeds auto-approval threshold of ${AMOUNT_THRESHOLD:.2f}"
+        reason = f"Amount ${total_amount:.2f} exceeds auto-approval threshold of ${amount_threshold:.2f}"
     elif not rule1_pass:
         escalate_to = "AP_CLERK"
         reason = f"Three-way match failed: {', '.join(discrepancies)}"
-    elif not rule3_pass:
+    else:  # not rule3_pass
         escalate_to = "AP_CLERK"
         reason = f"Low extraction confidence ({overall_confidence:.2f}). Manual verification required."
-    else:
-        escalate_to = "AP_CLERK"
-        reason = f"Vendor '{vendor_name}' is not in the approved vendor list"
     
     return {
         "decision": "ESCALATE",
@@ -436,7 +432,7 @@ The Records Agent follows a **Retrieve-then-Generate pattern** (RAG):
   "dataSource": {
     "type": "S3",
     "s3Configuration": {
-      "bucketArn": "arn:aws:s3:::intelliprocess-documents-dev-123456789012",
+      "bucketArn": "arn:aws:s3:::intelliprocess-ai-documents",
       "inclusionPrefixes": ["records/", "invoices/", "purchase-orders/"]
     }
   },

@@ -137,3 +137,25 @@ decision for the invoice module, not a blocker for the current pipeline.
   unaffected).
 - Mock path (`USE_MOCKS=true`) still returns a valid extraction.
 - No non-English characters in `extraction.py`.
+
+## Reuse for Purchase Order / Goods Receipt extraction
+
+The same BDA path (public invoice blueprint + `apac.data-automation-v1` profile)
+is reused to extract fields from uploaded **Purchase Order** and **Goods
+Receipt** documents. `extraction.py` exposes a lower-level, byte-oriented entry
+point (`extract_from_bytes(data, timeout_s)`) plus split-phase helpers
+(`start_bda_job` / `poll_bda_status` / `finalize_bda_job`) so the
+DashboardHandler can run extraction within the API Gateway 29s window and fall
+back to an asynchronous, pollable job when a document takes longer:
+
+- The `/purchase-orders/extract` and `/goods-receipts/extract` endpoints attempt
+  a synchronous extraction capped at ~18s. If it completes, they return `200`
+  with the extracted fields; otherwise they return `202` with
+  `{status: "pending", jobId}` (a base64 token wrapping the invocation ARN and
+  the document kind).
+- The matching `/status` endpoints poll the job and return `200` (done),
+  `202` (still running), or `422` (failed).
+
+No custom blueprint is required for POs/GRs — the invoice blueprint's field set
+is sufficient for the fields the reference records need (a product decision,
+Option A). See `09-api-specification.md` §7A and `07-component-design.md` §4.5b.

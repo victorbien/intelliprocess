@@ -366,6 +366,12 @@ Resources:
       Name: !Sub "IntelliProcess-API-${Stage}"
       StageName: !Ref Stage
       EndpointConfiguration: REGIONAL
+      # Treat multipart uploads as binary so API Gateway base64-encodes the body
+      # (isBase64Encoded=true) and Mangum decodes it intact for python-multipart.
+      # Without this, uploaded PDFs are corrupted (UTF-8 mangled) before reaching
+      # the handler, breaking PO/GR document extraction.
+      BinaryMediaTypes:
+        - "multipart/form-data"
       Cors:
         AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
         AllowHeaders: "'Content-Type,Authorization,X-Correlation-Id'"
@@ -576,8 +582,10 @@ Resources:
       FunctionName: !Sub "intelliprocess-dashboard-${Stage}"
       CodeUri: functions/dashboard_handler/
       Handler: lambda_function.lambda_handler
-      MemorySize: 128
-      Timeout: 10
+      # 512 MB + 29s: the PO/GR upload-extract endpoints run synchronous BDA
+      # extraction. 29s is the API Gateway integration ceiling.
+      MemorySize: 512
+      Timeout: 29
       Layers:
         - !Ref SharedLayer
       Events:
@@ -641,20 +649,52 @@ Resources:
             Path: /purchase-orders/upload
             Method: post
             RestApiId: !Ref ApiGateway
+        ExtractPurchaseOrderApi:
+          Type: Api
+          Properties:
+            Path: /purchase-orders/extract
+            Method: post
+            RestApiId: !Ref ApiGateway
+        ExtractPurchaseOrderStatusApi:
+          Type: Api
+          Properties:
+            Path: /purchase-orders/extract/status
+            Method: get
+            RestApiId: !Ref ApiGateway
         UploadGoodsReceiptApi:
           Type: Api
           Properties:
             Path: /goods-receipts/upload
             Method: post
             RestApiId: !Ref ApiGateway
+        ExtractGoodsReceiptApi:
+          Type: Api
+          Properties:
+            Path: /goods-receipts/extract
+            Method: post
+            RestApiId: !Ref ApiGateway
+        ExtractGoodsReceiptStatusApi:
+          Type: Api
+          Properties:
+            Path: /goods-receipts/extract/status
+            Method: get
+            RestApiId: !Ref ApiGateway
       Policies:
         - Statement:
-            - Sid: S3ReadDashboard
+            - Sid: S3ReadWriteDashboard
               Effect: Allow
               Action:
                 - s3:GetObject
+                - s3:PutObject   # PO/GR upload-extract writes the uploaded file
               Resource:
                 - "arn:aws:s3:::intelliprocess-ai-documents/*"
+            - Sid: BDAInvokeDashboard
+              Effect: Allow
+              Action:
+                - bedrock:InvokeDataAutomationAsync
+                - bedrock:GetDataAutomationStatus
+              Resource:
+                - "*"   # BDA async APIs require '*' (scoped to account resources)
             - Sid: DynamoDBReadWriteAllTables
               Effect: Allow
               Action:

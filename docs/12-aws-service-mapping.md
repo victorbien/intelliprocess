@@ -132,11 +132,18 @@
 
 | Configuration | Value |
 |--------------|-------|
-| Project Name | IntelliProcess-InvoiceExtraction |
-| Blueprint | Custom (invoice fields - see Prompt Design doc) |
-| Input Format | PDF, PNG, JPEG, TIFF |
-| Output Format | JSON with confidence scores |
-| Async Processing | Yes (invoke_data_automation_async) |
+| Blueprint | AWS-managed **public invoice blueprint** (`bedrock-data-automation-public-invoice`) — no custom blueprint/project provisioning required |
+| Data automation profile | `apac.data-automation-v1` (profile ARN resolved at runtime via STS) |
+| Input Format | PDF, PNG, JPEG |
+| Output Format | JSON (`inference_result` + `explainability_info` per-field confidence) |
+| Async Processing | Yes (`invoke_data_automation_async` + `get_data_automation_status`) |
+| Used by | InvoiceProcessor (invoice extraction) and DashboardHandler (PO/GR document extraction) |
+
+> Implementation note: The current implementation uses the AWS-managed public
+> invoice blueprint with a data-automation profile ARN (current BDA API). An
+> earlier design assumed a custom project + blueprint (`IntelliProcess-InvoiceExtraction`);
+> that is no longer required. See `17-bda-extraction-handoff.md` for the exact
+> ARNs and field mapping.
 
 **IAM Policy Required:**
 ```json
@@ -146,9 +153,13 @@
     "bedrock:InvokeDataAutomationAsync",
     "bedrock:GetDataAutomationStatus"
   ],
-  "Resource": "arn:aws:bedrock:us-east-1:*:data-automation-project/*"
+  "Resource": "*"
 }
 ```
+
+> The public-blueprint + profile path uses a wildcard resource (the profile ARN
+> is resolved at runtime and is account/region-specific, e.g. `ap-southeast-2`).
+> This policy is attached to both the InvoiceProcessor and DashboardHandler roles.
 
 ### 3.3 Bedrock Knowledge Bases
 
@@ -224,7 +235,7 @@
 
 | Configuration | Value |
 |--------------|-------|
-| Bucket Name | intelliprocess-documents-{stage}-{account-id} |
+| Bucket Name | intelliprocess-ai-documents (fixed name; `DeletionPolicy: Retain`) |
 | Encryption | SSE-S3 (AES-256) |
 | Public Access | Blocked (all four settings) |
 | Versioning | Disabled (MVP simplicity) |
@@ -254,6 +265,12 @@
 | IntelliProcess-GoodsReceipts | On-demand | AWS-managed | No |
 | IntelliProcess-Conversations | On-demand | AWS-managed | Yes (24h) |
 | IntelliProcess-Documents | On-demand | AWS-managed | No |
+| IntelliProcess-AppConfig | On-demand | AWS-managed | No |
+
+> `IntelliProcess-AppConfig` holds the singleton admin-configurable approval
+> settings (amount/confidence thresholds, PO/GR match tolerances). Read by the
+> InvoiceProcessor per run; read/written by the DashboardHandler via
+> `/admin/settings`. Defined with `DeletionPolicy: Retain`.
 
 ### 3.9 Amazon Cognito
 
@@ -419,7 +436,14 @@ Resources:
 | Cost | Lowest NA pricing | Budget |
 | Latency | Acceptable for demo | Not critical |
 
-**Decision:** Deploy everything in **us-east-1**. All required services are available and it offers the broadest Bedrock model selection.
+**Original decision:** Deploy everything in **us-east-1** for the broadest
+Bedrock model selection.
+
+**As deployed (updated):** The current environment is deployed in
+**ap-southeast-2**. Bedrock, Bedrock Data Automation (public invoice blueprint
+via the `apac.data-automation-v1` profile), DynamoDB, Lambda, S3, API Gateway,
+and Cognito are all used in `ap-southeast-2`. Foundation-model/inference-profile
+IDs and the BDA profile ARN are region-specific accordingly.
 
 ---
 
@@ -470,7 +494,7 @@ These services require manual setup (CloudFormation support limited):
 | 1 | Bedrock | Enable model access (Claude 3 Sonnet, Haiku, Titan Embed) | 5 min |
 | 2 | Bedrock KB | Create Knowledge Base + S3 data source | 15 min |
 | 3 | Bedrock KB | Initial sync after uploading sample documents | 5 min |
-| 4 | BDA | Create Data Automation project + custom blueprint | 20 min |
+| 4 | BDA | None required — uses the AWS-managed public invoice blueprint (no custom project/blueprint to create) | 0 min |
 | 5 | Guardrails | Create guardrail with topic + content policies | 10 min |
 | 6 | Cognito | Create test users and assign to groups | 10 min |
 
@@ -478,7 +502,7 @@ These services require manual setup (CloudFormation support limited):
 
 Everything else is managed via `sam deploy`:
 - S3 Bucket
-- DynamoDB Tables (5)
+- DynamoDB Tables (6, incl. AppConfig)
 - Lambda Functions (4) + Layer
 - API Gateway + Routes + Authorizer
 - IAM Roles and Policies

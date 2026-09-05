@@ -462,6 +462,7 @@ class PurchaseOrderUploadRequest(BaseModel):
     created_date: str | None = Field(None, alias="createdDate")
     department: str | None = Field(None, max_length=128)
     vendor_id: str | None = Field(None, alias="vendorId", max_length=64)
+    file_name: str | None = Field(None, alias="fileName", max_length=255)
 
     @field_validator("po_number")
     @classmethod
@@ -513,6 +514,7 @@ class GoodsReceiptUploadRequest(BaseModel):
     total_amount: float = Field(..., alias="totalAmount", gt=0)
     received_date: str | None = Field(None, alias="receivedDate")
     status: str = Field("COMPLETE", max_length=32)
+    file_name: str | None = Field(None, alias="fileName", max_length=255)
 
     @field_validator("gr_id")
     @classmethod
@@ -542,6 +544,67 @@ class GoodsReceiptUploadResponse(BaseModel):
     gr_id: str = Field(..., alias="grId")
     po_number: str = Field(..., alias="poNumber")
     message: str = "Goods receipt stored and linked to the purchase order."
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Purchase Order / Goods Receipt List & Detail (view for AP/Finance/Admin) ──
+
+
+class PurchaseOrderListItem(BaseModel):
+    """A single Purchase Order row for GET /purchase-orders.
+
+    ``fileName`` falls back to the PO number when the record was created from
+    the structured form (no uploaded document), so the UI always has a label
+    that links to the detail view.
+    """
+
+    po_number: str = Field(..., alias="poNumber")
+    file_name: str | None = Field(None, alias="fileName")
+    vendor_name: str | None = Field(None, alias="vendorName")
+    total_amount: float | None = Field(None, alias="totalAmount")
+    total_quantity: float | None = Field(None, alias="totalQuantity")
+    currency: str | None = None
+    status: str | None = None
+    created_date: str | None = Field(None, alias="createdDate")
+    uploaded_by: str | None = Field(None, alias="uploadedBy")
+    uploaded_at: str | None = Field(None, alias="uploadedAt")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class PurchaseOrderDetailResponse(PurchaseOrderListItem):
+    """Full Purchase Order detail for GET /purchase-orders/{poNumber}."""
+
+    department: str | None = None
+    vendor_id: str | None = Field(None, alias="vendorId")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class GoodsReceiptListItem(BaseModel):
+    """A single Goods Receipt row for GET /goods-receipts.
+
+    ``vendorName`` is denormalised from the linked PO at upload time.
+    ``fileName`` falls back to the GR id when there is no uploaded document.
+    """
+
+    gr_id: str = Field(..., alias="grId")
+    po_number: str | None = Field(None, alias="poNumber")
+    file_name: str | None = Field(None, alias="fileName")
+    vendor_name: str | None = Field(None, alias="vendorName")
+    total_amount: float | None = Field(None, alias="totalAmount")
+    total_quantity_received: float | None = Field(None, alias="totalQuantityReceived")
+    status: str | None = None
+    received_date: str | None = Field(None, alias="receivedDate")
+    uploaded_by: str | None = Field(None, alias="uploadedBy")
+    uploaded_at: str | None = Field(None, alias="uploadedAt")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class GoodsReceiptDetailResponse(GoodsReceiptListItem):
+    """Full Goods Receipt detail for GET /goods-receipts/{grId}."""
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
 

@@ -215,6 +215,43 @@ export interface ApprovalSettings {
   grQtyTolerance: number;
 }
 
+/** A Purchase Order row for GET /purchase-orders. */
+export interface PurchaseOrderListItem {
+  poNumber: string;
+  fileName?: string | null;
+  vendorName?: string | null;
+  totalAmount?: number | null;
+  totalQuantity?: number | null;
+  currency?: string | null;
+  status?: string | null;
+  createdDate?: string | null;
+  uploadedBy?: string | null;
+  uploadedAt?: string | null;
+}
+
+/** Full Purchase Order detail for GET /purchase-orders/{poNumber}. */
+export interface PurchaseOrderDetail extends PurchaseOrderListItem {
+  department?: string | null;
+  vendorId?: string | null;
+}
+
+/** A Goods Receipt row for GET /goods-receipts. */
+export interface GoodsReceiptListItem {
+  grId: string;
+  poNumber?: string | null;
+  fileName?: string | null;
+  vendorName?: string | null;
+  totalAmount?: number | null;
+  totalQuantityReceived?: number | null;
+  status?: string | null;
+  receivedDate?: string | null;
+  uploadedBy?: string | null;
+  uploadedAt?: string | null;
+}
+
+/** Full Goods Receipt detail for GET /goods-receipts/{grId}. */
+export type GoodsReceiptDetail = GoodsReceiptListItem;
+
 /** Candidate PO fields extracted from an uploaded document (POST /purchase-orders/extract). */
 export interface PurchaseOrderExtract {
   status?: string; // "complete"

@@ -662,6 +662,18 @@ Resources:
             Path: /purchase-orders/extract/status
             Method: get
             RestApiId: !Ref ApiGateway
+        ListPurchaseOrdersApi:
+          Type: Api
+          Properties:
+            Path: /purchase-orders
+            Method: get
+            RestApiId: !Ref ApiGateway
+        GetPurchaseOrderApi:
+          Type: Api
+          Properties:
+            Path: /purchase-orders/{poNumber}
+            Method: get
+            RestApiId: !Ref ApiGateway
         UploadGoodsReceiptApi:
           Type: Api
           Properties:
@@ -678,6 +690,18 @@ Resources:
           Type: Api
           Properties:
             Path: /goods-receipts/extract/status
+            Method: get
+            RestApiId: !Ref ApiGateway
+        ListGoodsReceiptsApi:
+          Type: Api
+          Properties:
+            Path: /goods-receipts
+            Method: get
+            RestApiId: !Ref ApiGateway
+        GetGoodsReceiptApi:
+          Type: Api
+          Properties:
+            Path: /goods-receipts/{grId}
             Method: get
             RestApiId: !Ref ApiGateway
       Policies:

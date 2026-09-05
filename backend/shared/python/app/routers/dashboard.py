@@ -40,10 +40,15 @@ from app.models.schemas import (
     ApprovalSettings,
     DashboardStatsResponse,
     ExtractPending,
+    GoodsReceiptDetailResponse,
     GoodsReceiptExtractResponse,
+    GoodsReceiptListItem,
     GoodsReceiptUploadRequest,
     GoodsReceiptUploadResponse,
+    PaginatedResponse,
+    PurchaseOrderDetailResponse,
     PurchaseOrderExtractResponse,
+    PurchaseOrderListItem,
     PurchaseOrderUploadRequest,
     PurchaseOrderUploadResponse,
     SeedDataRequest,
@@ -281,6 +286,7 @@ async def upload_purchase_order(
     three-way matching against future invoices.
     """
     created_date = body.created_date or datetime.now(timezone.utc).date().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     logger.info(
         "Purchase order upload",
@@ -299,6 +305,10 @@ async def upload_purchase_order(
         "currency": body.currency,
         "createdDate": created_date,
         "status": "OPEN",
+        # Provenance for the list/detail views (uploaded by / when / file name).
+        "fileName": body.file_name or body.po_number,
+        "uploadedBy": user.email or user.user_id,
+        "uploadedAt": now,
     }
     if body.department:
         item["department"] = body.department
@@ -318,6 +328,73 @@ async def upload_purchase_order(
         status_code=201,
         data=PurchaseOrderUploadResponse(poNumber=body.po_number),
     )
+
+
+# ── GET /purchase-orders  (list — view for Admin/AP Clerk/Finance Manager) ─────
+
+
+@po_router.get(
+    "",
+    response_model=ApiResponse[PaginatedResponse[PurchaseOrderListItem]],
+)
+async def list_purchase_orders(
+    user: Annotated[
+        CurrentUser,
+        Depends(require_role(UserRole.ADMIN, UserRole.AP_CLERK, UserRole.FINANCE_MANAGER)),
+    ],
+):
+    """List all stored Purchase Orders (view-only for AP Clerk / Finance Manager).
+
+    Uploading remains ADMIN-only; every authorised role may view the list.
+    """
+    logger.info("Purchase order list requested", extra={"userId": user.user_id})
+
+    try:
+        items = _po_db.scan_all()
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Purchase order list scan failed", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while retrieving purchase orders. Please try again.",
+            status_code=500,
+        )
+
+    rows = [_map_po_row(it) for it in items]
+    # Most recent first (uploadedAt falls back to createdDate for legacy rows).
+    rows.sort(key=lambda r: str(r.uploaded_at or r.created_date or ""), reverse=True)
+
+    return ApiResponse(
+        data=PaginatedResponse(items=rows, count=len(rows), next_key=None)
+    )
+
+
+# ── GET /purchase-orders/{poNumber}  (detail — view for the same roles) ────────
+
+
+@po_router.get(
+    "/{po_number}",
+    response_model=ApiResponse[PurchaseOrderDetailResponse],
+)
+async def get_purchase_order(
+    po_number: str,
+    user: Annotated[
+        CurrentUser,
+        Depends(require_role(UserRole.ADMIN, UserRole.AP_CLERK, UserRole.FINANCE_MANAGER)),
+    ],
+):
+    """Return one Purchase Order's full detail."""
+    try:
+        item = _po_db.get_item({"poNumber": po_number})
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Purchase order lookup failed", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while retrieving the purchase order. Please try again.",
+            status_code=500,
+        )
+
+    if not item:
+        raise AppError("Purchase order not found.", status_code=404)
+
+    return ApiResponse(data=_map_po_detail(item))
 
 
 # ── Upload-and-extract helpers ────────────────────────────────────────────────
@@ -516,6 +593,7 @@ async def upload_goods_receipt(
     available for three-way matching.
     """
     received_date = body.received_date or datetime.now(timezone.utc).date().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     logger.info(
         "Goods receipt upload",
@@ -555,6 +633,13 @@ async def upload_goods_receipt(
         "totalAmount": Decimal(str(body.total_amount)),
         "receivedDate": received_date,
         "status": body.status,
+        # Denormalise the vendor from the linked PO so the GR list can show it
+        # without an extra lookup per row.
+        "vendorName": linked_po.get("vendorName"),
+        # Provenance for the list/detail views.
+        "fileName": body.file_name or body.gr_id,
+        "uploadedBy": user.email or user.user_id,
+        "uploadedAt": now,
     }
 
     try:
@@ -573,6 +658,69 @@ async def upload_goods_receipt(
             poNumber=body.po_number,
         ),
     )
+
+
+# ── GET /goods-receipts  (list — view for Admin/AP Clerk/Finance Manager) ──────
+
+
+@gr_router.get(
+    "",
+    response_model=ApiResponse[PaginatedResponse[GoodsReceiptListItem]],
+)
+async def list_goods_receipts(
+    user: Annotated[
+        CurrentUser,
+        Depends(require_role(UserRole.ADMIN, UserRole.AP_CLERK, UserRole.FINANCE_MANAGER)),
+    ],
+):
+    """List all stored Goods Receipts (view-only for AP Clerk / Finance Manager)."""
+    logger.info("Goods receipt list requested", extra={"userId": user.user_id})
+
+    try:
+        items = _gr_db.scan_all()
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Goods receipt list scan failed", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while retrieving goods receipts. Please try again.",
+            status_code=500,
+        )
+
+    rows = [_map_gr_row(it) for it in items]
+    rows.sort(key=lambda r: str(r.uploaded_at or r.received_date or ""), reverse=True)
+
+    return ApiResponse(
+        data=PaginatedResponse(items=rows, count=len(rows), next_key=None)
+    )
+
+
+# ── GET /goods-receipts/{grId}  (detail — view for the same roles) ─────────────
+
+
+@gr_router.get(
+    "/{gr_id}",
+    response_model=ApiResponse[GoodsReceiptDetailResponse],
+)
+async def get_goods_receipt(
+    gr_id: str,
+    user: Annotated[
+        CurrentUser,
+        Depends(require_role(UserRole.ADMIN, UserRole.AP_CLERK, UserRole.FINANCE_MANAGER)),
+    ],
+):
+    """Return one Goods Receipt's full detail."""
+    try:
+        item = _gr_db.get_item({"grId": gr_id})
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Goods receipt lookup failed", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while retrieving the goods receipt. Please try again.",
+            status_code=500,
+        )
+
+    if not item:
+        raise AppError("Goods receipt not found.", status_code=404)
+
+    return ApiResponse(data=_map_gr_detail(item))
 
 
 # ── POST /goods-receipts/extract ──────────────────────────────────────────────
@@ -658,6 +806,66 @@ def _clean_str(value: object) -> str | None:
         s = value.strip()
         return s or None
     return None
+
+
+def _to_float(value: object) -> float | None:
+    """Coerce a DynamoDB Decimal / str / int / float to float, or None."""
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _map_po_row(item: dict) -> PurchaseOrderListItem:
+    """Map a raw PO DynamoDB item to a list row (Decimals → float)."""
+    po_number = str(item.get("poNumber", ""))
+    return PurchaseOrderListItem(
+        poNumber=po_number,
+        fileName=item.get("fileName") or po_number,
+        vendorName=item.get("vendorName"),
+        totalAmount=_to_float(item.get("totalAmount")),
+        totalQuantity=_to_float(item.get("totalQuantity")),
+        currency=item.get("currency"),
+        status=item.get("status"),
+        createdDate=item.get("createdDate"),
+        uploadedBy=item.get("uploadedBy"),
+        uploadedAt=item.get("uploadedAt"),
+    )
+
+
+def _map_po_detail(item: dict) -> PurchaseOrderDetailResponse:
+    """Map a raw PO DynamoDB item to the full detail response."""
+    base = _map_po_row(item)
+    return PurchaseOrderDetailResponse(
+        **base.model_dump(by_alias=True),
+        department=item.get("department"),
+        vendorId=item.get("vendorId"),
+    )
+
+
+def _map_gr_row(item: dict) -> GoodsReceiptListItem:
+    """Map a raw GR DynamoDB item to a list row (Decimals → float)."""
+    gr_id = str(item.get("grId", ""))
+    return GoodsReceiptListItem(
+        grId=gr_id,
+        poNumber=item.get("poNumber"),
+        fileName=item.get("fileName") or gr_id,
+        vendorName=item.get("vendorName"),
+        totalAmount=_to_float(item.get("totalAmount")),
+        totalQuantityReceived=_to_float(item.get("totalQuantityReceived")),
+        status=item.get("status"),
+        receivedDate=item.get("receivedDate"),
+        uploadedBy=item.get("uploadedBy"),
+        uploadedAt=item.get("uploadedAt"),
+    )
+
+
+def _map_gr_detail(item: dict) -> GoodsReceiptDetailResponse:
+    """Map a raw GR DynamoDB item to the full detail response."""
+    base = _map_gr_row(item)
+    return GoodsReceiptDetailResponse(**base.model_dump(by_alias=True))
 
 
 def _write_records(

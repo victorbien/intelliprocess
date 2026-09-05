@@ -8,6 +8,10 @@ import { useAuth } from "./context/useAuth";
 import DashboardPage from "./pages/DashboardPage";
 import InvoicesPage from "./pages/InvoicesPage";
 import InvoiceDetailPage from "./pages/InvoiceDetailPage";
+import PurchaseOrdersPage from "./pages/PurchaseOrdersPage";
+import PurchaseOrderDetailPage from "./pages/PurchaseOrderDetailPage";
+import GoodsReceiptsPage from "./pages/GoodsReceiptsPage";
+import GoodsReceiptDetailPage from "./pages/GoodsReceiptDetailPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import AdminPage from "./pages/AdminPage";
 import LoginPage from "./pages/LoginPage";
@@ -58,6 +62,38 @@ export default function App() {
               element={
                 <ProtectedRoute roles={["AP_CLERK", "FINANCE_MANAGER", "ADMIN"]}>
                   <InvoiceDetailPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/purchase-orders"
+              element={
+                <ProtectedRoute roles={["AP_CLERK", "FINANCE_MANAGER", "ADMIN"]}>
+                  <PurchaseOrdersPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/purchase-orders/:id"
+              element={
+                <ProtectedRoute roles={["AP_CLERK", "FINANCE_MANAGER", "ADMIN"]}>
+                  <PurchaseOrderDetailPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/goods-receipts"
+              element={
+                <ProtectedRoute roles={["AP_CLERK", "FINANCE_MANAGER", "ADMIN"]}>
+                  <GoodsReceiptsPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/goods-receipts/:id"
+              element={
+                <ProtectedRoute roles={["AP_CLERK", "FINANCE_MANAGER", "ADMIN"]}>
+                  <GoodsReceiptDetailPage />
                 </ProtectedRoute>
               }
             />

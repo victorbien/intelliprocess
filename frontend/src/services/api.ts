@@ -19,10 +19,14 @@ import {
   type DocumentUploadResponse,
   type ApprovalSettings,
   type ExtractPending,
+  type GoodsReceiptDetail,
   type GoodsReceiptExtract,
+  type GoodsReceiptListItem,
   type GoodsReceiptUploadResponse,
   type InvoiceApproveResponse,
+  type PurchaseOrderDetail,
   type PurchaseOrderExtract,
+  type PurchaseOrderListItem,
   type InvoiceDetail,
   type InvoiceListItem,
   type InvoiceUploadResponse,
@@ -266,6 +270,7 @@ export const adminApi = {
     totalQuantity: number;
     currency?: string;
     department?: string;
+    fileName?: string;
   }) => post<PurchaseOrderUploadResponse>("/purchase-orders/upload", body),
   uploadGoodsReceipt: (body: {
     grId: string;
@@ -273,6 +278,7 @@ export const adminApi = {
     totalQuantityReceived: number;
     totalAmount: number;
     status?: string;
+    fileName?: string;
   }) => post<GoodsReceiptUploadResponse>("/goods-receipts/upload", body),
   getSettings: () => get<ApprovalSettings>("/admin/settings"),
   updateSettings: (body: ApprovalSettings) =>
@@ -289,6 +295,20 @@ export const adminApi = {
       "/goods-receipts/extract/status",
       file,
     ),
+};
+
+// ─── Purchase Orders (list + detail — viewable by AP/Finance/Admin) ───────────
+export const purchaseOrdersApi = {
+  list: () => get<PaginatedResponse<PurchaseOrderListItem>>("/purchase-orders"),
+  detail: (poNumber: string) =>
+    get<PurchaseOrderDetail>(`/purchase-orders/${encodeURIComponent(poNumber)}`),
+};
+
+// ─── Goods Receipts (list + detail — viewable by AP/Finance/Admin) ────────────
+export const goodsReceiptsApi = {
+  list: () => get<PaginatedResponse<GoodsReceiptListItem>>("/goods-receipts"),
+  detail: (grId: string) =>
+    get<GoodsReceiptDetail>(`/goods-receipts/${encodeURIComponent(grId)}`),
 };
 
 // ─── Records Assistant (chat) — streaming, citations, session summary ─────────

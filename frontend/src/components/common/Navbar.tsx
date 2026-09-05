@@ -21,6 +21,8 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { to: "/invoices", label: "Invoices", roles: ["AP_CLERK", "FINANCE_MANAGER", "ADMIN"] },
+  { to: "/purchase-orders", label: "Purchase Orders", roles: ["AP_CLERK", "FINANCE_MANAGER", "ADMIN"] },
+  { to: "/goods-receipts", label: "Goods Receipt", roles: ["AP_CLERK", "FINANCE_MANAGER", "ADMIN"] },
   { to: "/documents", label: "Documents" },
   { to: "/dashboard", label: "Dashboard", roles: ["FINANCE_MANAGER", "ADMIN"] },
   { to: "/admin", label: "Admin", roles: ["ADMIN"] },

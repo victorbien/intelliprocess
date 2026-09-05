@@ -170,7 +170,7 @@ export default function AdminPage() {
   };
 
   // ── PO upload ────────────────────────────────────────────────────────────────
-  const [po, setPo] = useState({ poNumber: "", vendorName: "", totalAmount: "" });
+  const [po, setPo] = useState({ poNumber: "", vendorName: "", totalAmount: "", totalQuantity: "" });
   const [poBusy, setPoBusy] = useState(false);
   const [poMsg, setPoMsg] = useState<Feedback>(null);
   const [poExtracting, setPoExtracting] = useState(false);
@@ -188,13 +188,16 @@ export default function AdminPage() {
         poNumber: res.poNumber ?? "",
         vendorName: res.vendorName ?? "",
         totalAmount: res.totalAmount != null ? String(res.totalAmount) : "",
+        totalQuantity: res.totalQuantity != null ? String(res.totalQuantity) : "",
       });
       const conf = res.overallConfidence != null ? ` · ${Math.round(res.overallConfidence * 100)}% confidence` : "";
-      const filled = [res.poNumber, res.vendorName, res.totalAmount].filter((v) => v != null && v !== "").length;
+      const filled = [res.poNumber, res.vendorName, res.totalAmount, res.totalQuantity].filter(
+        (v) => v != null && v !== "",
+      ).length;
       if (filled === 0) {
         setPoMsg({ tone: "err", text: "No fields could be read from that document. Enter the details manually." });
       } else {
-        setPoMsg({ tone: "ok", text: `Auto-filled ${filled} of 3 fields${conf}. Review and edit before saving.` });
+        setPoMsg({ tone: "ok", text: `Auto-filled ${filled} of 4 fields${conf}. Review and edit before saving.` });
       }
     } catch (err) {
       setPoMsg({ tone: "err", text: err instanceof ApiError ? err.message : "Extraction failed." });
@@ -205,8 +208,19 @@ export default function AdminPage() {
 
   const submitPo = async () => {
     const amount = Number(po.totalAmount);
-    if (!po.poNumber.trim() || !po.vendorName.trim() || !Number.isFinite(amount) || amount <= 0) {
-      setPoMsg({ tone: "err", text: "PO number, vendor, and a positive amount are required." });
+    const quantity = Number(po.totalQuantity);
+    if (
+      !po.poNumber.trim() ||
+      !po.vendorName.trim() ||
+      !Number.isFinite(amount) ||
+      amount <= 0 ||
+      !Number.isFinite(quantity) ||
+      quantity <= 0
+    ) {
+      setPoMsg({
+        tone: "err",
+        text: "PO number, vendor, a positive amount, and a positive quantity are required.",
+      });
       return;
     }
     setPoBusy(true);
@@ -216,9 +230,10 @@ export default function AdminPage() {
         poNumber: po.poNumber.trim(),
         vendorName: po.vendorName.trim(),
         totalAmount: amount,
+        totalQuantity: quantity,
       });
       setPoMsg({ tone: "ok", text: `Purchase order ${po.poNumber.trim()} stored.` });
-      setPo({ poNumber: "", vendorName: "", totalAmount: "" });
+      setPo({ poNumber: "", vendorName: "", totalAmount: "", totalQuantity: "" });
     } catch (err) {
       setPoMsg({ tone: "err", text: err instanceof ApiError ? err.message : "PO upload failed." });
     } finally {
@@ -227,7 +242,7 @@ export default function AdminPage() {
   };
 
   // ── GR upload ────────────────────────────────────────────────────────────────
-  const [gr, setGr] = useState({ grId: "", poNumber: "", totalQuantityReceived: "" });
+  const [gr, setGr] = useState({ grId: "", poNumber: "", totalQuantityReceived: "", totalAmount: "" });
   const [grBusy, setGrBusy] = useState(false);
   const [grMsg, setGrMsg] = useState<Feedback>(null);
   const [grExtracting, setGrExtracting] = useState(false);
@@ -245,13 +260,16 @@ export default function AdminPage() {
         grId: res.grId ?? "",
         poNumber: res.poNumber ?? "",
         totalQuantityReceived: res.totalQuantityReceived != null ? String(res.totalQuantityReceived) : "",
+        totalAmount: res.totalAmount != null ? String(res.totalAmount) : "",
       });
       const conf = res.overallConfidence != null ? ` · ${Math.round(res.overallConfidence * 100)}% confidence` : "";
-      const filled = [res.grId, res.poNumber, res.totalQuantityReceived].filter((v) => v != null && v !== "").length;
+      const filled = [res.grId, res.poNumber, res.totalQuantityReceived, res.totalAmount].filter(
+        (v) => v != null && v !== "",
+      ).length;
       if (filled === 0) {
         setGrMsg({ tone: "err", text: "No fields could be read from that document. Enter the details manually." });
       } else {
-        setGrMsg({ tone: "ok", text: `Auto-filled ${filled} of 3 fields${conf}. Review and edit before saving.` });
+        setGrMsg({ tone: "ok", text: `Auto-filled ${filled} of 4 fields${conf}. Review and edit before saving.` });
       }
     } catch (err) {
       setGrMsg({ tone: "err", text: err instanceof ApiError ? err.message : "Extraction failed." });
@@ -262,8 +280,19 @@ export default function AdminPage() {
 
   const submitGr = async () => {
     const qty = Number(gr.totalQuantityReceived);
-    if (!gr.grId.trim() || !gr.poNumber.trim() || !Number.isFinite(qty) || qty <= 0) {
-      setGrMsg({ tone: "err", text: "GR id, PO number, and a positive quantity are required." });
+    const amount = Number(gr.totalAmount);
+    if (
+      !gr.grId.trim() ||
+      !gr.poNumber.trim() ||
+      !Number.isFinite(qty) ||
+      qty <= 0 ||
+      !Number.isFinite(amount) ||
+      amount <= 0
+    ) {
+      setGrMsg({
+        tone: "err",
+        text: "GR id, PO number, a positive quantity, and a positive amount are required.",
+      });
       return;
     }
     setGrBusy(true);
@@ -273,9 +302,10 @@ export default function AdminPage() {
         grId: gr.grId.trim(),
         poNumber: gr.poNumber.trim(),
         totalQuantityReceived: qty,
+        totalAmount: amount,
       });
       setGrMsg({ tone: "ok", text: `Goods receipt ${gr.grId.trim()} linked to ${gr.poNumber.trim()}.` });
-      setGr({ grId: "", poNumber: "", totalQuantityReceived: "" });
+      setGr({ grId: "", poNumber: "", totalQuantityReceived: "", totalAmount: "" });
     } catch (err) {
       setGrMsg({ tone: "err", text: err instanceof ApiError ? err.message : "GR upload failed." });
     } finally {
@@ -319,9 +349,9 @@ export default function AdminPage() {
       return;
     }
     for (const [label, v] of [
-      ["Confidence threshold", confidenceThreshold],
-      ["PO amount tolerance", poAmountTolerance],
-      ["GR quantity tolerance", grQtyTolerance],
+      ["Confidence Threshold", confidenceThreshold],
+      ["Total Amount Tolerance", poAmountTolerance],
+      ["Total Quantity Tolerance", grQtyTolerance],
     ] as const) {
       if (!Number.isFinite(v) || v < 0 || v > 1) {
         setSettingsMsg({ tone: "err", text: `${label} must be between 0 and 1.` });
@@ -377,7 +407,7 @@ export default function AdminPage() {
           ) : settings ? (
             <div className="space-y-2">
               <label className="block">
-                <span className="text-xs font-medium text-slate-600">Amount auto-approval threshold (USD)</span>
+                <span className="text-xs font-medium text-slate-600">Amount Auto-Approval Threshold (NZD)</span>
                 <input
                   type="number"
                   min="0"
@@ -389,7 +419,7 @@ export default function AdminPage() {
               </label>
               <label className="block">
                 <span className="text-xs font-medium text-slate-600">
-                  Confidence threshold (0–1, e.g. 0.85 = 85%)
+                  Ouput Confidence Threshold (0–1, e.g. 0.85 = 85%)
                 </span>
                 <input
                   type="number"
@@ -403,7 +433,7 @@ export default function AdminPage() {
               </label>
               <label className="block">
                 <span className="text-xs font-medium text-slate-600">
-                  PO amount tolerance (0–1, 0 = exact, 0.02 = ±2%)
+                  Total Amount Tolerance (0–1, 0 = exact, 0.02 = ±2%)
                 </span>
                 <input
                   type="number"
@@ -417,7 +447,7 @@ export default function AdminPage() {
               </label>
               <label className="block">
                 <span className="text-xs font-medium text-slate-600">
-                  GR quantity tolerance (0–1, 0 = exact, 0.02 = ±2%)
+                  Total Quantity Tolerance (0–1, 0 = exact, 0.02 = ±2%)
                 </span>
                 <input
                   type="number"
@@ -466,7 +496,7 @@ export default function AdminPage() {
           />
           <fieldset disabled={poLocked} className="space-y-2 disabled:opacity-60">
             <label className="block">
-              <span className="text-xs font-medium text-slate-600">PO number</span>
+              <span className="text-xs font-medium text-slate-600">Purchase Order Number</span>
               <input
                 className={inputCls}
                 value={po.poNumber}
@@ -474,7 +504,7 @@ export default function AdminPage() {
               />
             </label>
             <label className="block">
-              <span className="text-xs font-medium text-slate-600">Vendor name</span>
+              <span className="text-xs font-medium text-slate-600">Vendor Name</span>
               <input
                 className={inputCls}
                 value={po.vendorName}
@@ -482,7 +512,7 @@ export default function AdminPage() {
               />
             </label>
             <label className="block">
-              <span className="text-xs font-medium text-slate-600">Total amount (USD)</span>
+              <span className="text-xs font-medium text-slate-600">Total Amount (NZD)</span>
               <input
                 type="number"
                 min="0"
@@ -490,6 +520,17 @@ export default function AdminPage() {
                 className={inputCls}
                 value={po.totalAmount}
                 onChange={(e) => setPo({ ...po, totalAmount: e.target.value })}
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs font-medium text-slate-600">Total Quantity</span>
+              <input
+                type="number"
+                min="0"
+                step="1"
+                className={inputCls}
+                value={po.totalQuantity}
+                onChange={(e) => setPo({ ...po, totalQuantity: e.target.value })}
               />
             </label>
             <button type="button" disabled={poLocked} onClick={() => void submitPo()} className={`${btnCls} inline-flex items-center gap-2`}>
@@ -509,7 +550,7 @@ export default function AdminPage() {
           />
           <fieldset disabled={grLocked} className="space-y-2 disabled:opacity-60">
             <label className="block">
-              <span className="text-xs font-medium text-slate-600">GR id</span>
+              <span className="text-xs font-medium text-slate-600">Goods Receipt Number/ID</span>
               <input
                 className={inputCls}
                 value={gr.grId}
@@ -517,7 +558,7 @@ export default function AdminPage() {
               />
             </label>
             <label className="block">
-              <span className="text-xs font-medium text-slate-600">PO number</span>
+              <span className="text-xs font-medium text-slate-600">Purchase Order Number</span>
               <input
                 className={inputCls}
                 value={gr.poNumber}
@@ -525,7 +566,18 @@ export default function AdminPage() {
               />
             </label>
             <label className="block">
-              <span className="text-xs font-medium text-slate-600">Quantity received</span>
+              <span className="text-xs font-medium text-slate-600">Total Amount (NZD)</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                className={inputCls}
+                value={gr.totalAmount}
+                onChange={(e) => setGr({ ...gr, totalAmount: e.target.value })}
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs font-medium text-slate-600">Total Quantity</span>
               <input
                 type="number"
                 min="0"

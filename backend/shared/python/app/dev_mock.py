@@ -199,7 +199,7 @@ def _seed_invoices() -> None:
         {
             "documentId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
             "fileName": "INV-2024-0891-Acme.pdf",
-            "s3Key": "invoices/f47ac10b-58cc-4372-a567-0e02b2c3d479/INV-2024-0891-Acme.pdf",
+            "s3Key": "invoices/processed/f47ac10b-58cc-4372-a567-0e02b2c3d479/INV-2024-0891-Acme.pdf",
             "documentType": "invoices",
             "status": "APPROVED",
             "uploadedBy": "dev-user-001",
@@ -232,11 +232,16 @@ def _seed_invoices() -> None:
                 "threeWayMatch": "PASS",
                 "poMatch": {
                     "status": "MATCHED", "poId": "PO-2024-0456",
-                    "amountVariancePct": D(0.0), "discrepancies": [],
+                    "amountVariancePct": D(0.0), "poAmount": D(658.80), "amountInvoiced": D(658.80),
+                    "quantityVariancePct": D(0.0),
+                    "poQuantity": D(15), "invoicedQuantity": D(15),
+                    "discrepancies": [],
                 },
                 "grMatch": {
                     "status": "CONFIRMED", "grId": "GR-2024-0789",
-                    "quantityReceived": D(15), "discrepancies": [],
+                    "quantityReceived": D(15), "quantityInvoiced": D(15),
+                    "amountReceived": D(658.80), "amountInvoiced": D(658.80),
+                    "amountVariancePct": D(0.0), "discrepancies": [],
                 },
             },
             "approvalDecision": {
@@ -250,7 +255,7 @@ def _seed_invoices() -> None:
         {
             "documentId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
             "fileName": "INV-2024-0892-TechParts.pdf",
-            "s3Key": "invoices/a1b2c3d4-e5f6-7890-abcd-ef1234567890/INV-2024-0892-TechParts.pdf",
+            "s3Key": "invoices/processed/a1b2c3d4-e5f6-7890-abcd-ef1234567890/INV-2024-0892-TechParts.pdf",
             "documentType": "invoices",
             "status": "ESCALATED",
             "uploadedBy": "dev-user-001",
@@ -276,11 +281,16 @@ def _seed_invoices() -> None:
                 "threeWayMatch": "PASS",
                 "poMatch": {
                     "status": "MATCHED", "poId": "PO-2024-0457",
-                    "amountVariancePct": D(0.0), "discrepancies": [],
+                    "amountVariancePct": D(0.0), "poAmount": D(15000.00), "amountInvoiced": D(15000.00),
+                    "quantityVariancePct": D(0.0),
+                    "poQuantity": D(10), "invoicedQuantity": D(10),
+                    "discrepancies": [],
                 },
                 "grMatch": {
                     "status": "CONFIRMED", "grId": "GR-2024-0790",
-                    "quantityReceived": D(10), "discrepancies": [],
+                    "quantityReceived": D(10), "quantityInvoiced": D(10),
+                    "amountReceived": D(15000.00), "amountInvoiced": D(15000.00),
+                    "amountVariancePct": D(0.0), "discrepancies": [],
                 },
             },
             "approvalDecision": {
@@ -293,7 +303,7 @@ def _seed_invoices() -> None:
         {
             "documentId": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
             "fileName": "INV-2024-0893-UnknownVendor.pdf",
-            "s3Key": "invoices/b2c3d4e5-f6a7-8901-bcde-f12345678901/INV-2024-0893-UnknownVendor.pdf",
+            "s3Key": "invoices/processed/b2c3d4e5-f6a7-8901-bcde-f12345678901/INV-2024-0893-UnknownVendor.pdf",
             "documentType": "invoices",
             "status": "ESCALATED",
             "uploadedBy": "dev-user-001",
@@ -329,7 +339,7 @@ def _seed_invoices() -> None:
         {
             "documentId": "c3d4e5f6-a7b8-9012-cdef-123456789012",
             "fileName": "INV-2024-0894-Processing.pdf",
-            "s3Key": "invoices/c3d4e5f6-a7b8-9012-cdef-123456789012/INV-2024-0894-Processing.pdf",
+            "s3Key": "invoices/incoming/c3d4e5f6-a7b8-9012-cdef-123456789012/INV-2024-0894-Processing.pdf",
             "documentType": "invoices",
             "status": "PROCESSING",
             "uploadedBy": "dev-user-001",
@@ -352,6 +362,7 @@ def _seed_purchase_orders() -> None:
             "vendorId": "VENDOR-001",
             "createdDate": "2026-07-01",
             "totalAmount": Decimal("658.80"),
+            "totalQuantity": Decimal("15"),
             "currency": "USD",
             "status": "OPEN",
             "department": "Administration",
@@ -362,6 +373,7 @@ def _seed_purchase_orders() -> None:
             "vendorId": "VENDOR-002",
             "createdDate": "2026-07-05",
             "totalAmount": Decimal("15000.00"),
+            "totalQuantity": Decimal("10"),
             "currency": "USD",
             "status": "OPEN",
             "department": "Engineering",
@@ -379,6 +391,7 @@ def _seed_goods_receipts() -> None:
             "poNumber": "PO-2024-0456",
             "receivedDate": "2026-07-15",
             "totalQuantityReceived": Decimal("15"),
+            "totalAmount": Decimal("658.80"),
             "status": "COMPLETE",
         },
         {
@@ -386,6 +399,7 @@ def _seed_goods_receipts() -> None:
             "poNumber": "PO-2024-0457",
             "receivedDate": "2026-07-18",
             "totalQuantityReceived": Decimal("10"),
+            "totalAmount": Decimal("15000.00"),
             "status": "COMPLETE",
         },
     ]

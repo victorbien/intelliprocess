@@ -465,6 +465,7 @@ Resources:
               Action:
                 - s3:GetObject
                 - s3:PutObject
+                - s3:DeleteObject   # move incoming/ -> processed/ | failed/ (copy + delete)
               Resource:
                 - "arn:aws:s3:::intelliprocess-ai-documents/*"
             - Sid: DynamoDBCRUDProcessor
@@ -685,7 +686,8 @@ Resources:
               Effect: Allow
               Action:
                 - s3:GetObject
-                - s3:PutObject   # PO/GR upload-extract writes the uploaded file
+                - s3:PutObject     # PO/GR upload-extract writes the uploaded file
+                - s3:DeleteObject  # move incoming/ -> processed/ | failed/ (copy + delete)
               Resource:
                 - "arn:aws:s3:::intelliprocess-ai-documents/*"
             - Sid: BDAInvokeDashboard

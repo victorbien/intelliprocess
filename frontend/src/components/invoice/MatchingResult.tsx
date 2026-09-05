@@ -36,14 +36,49 @@ function subStatus(part?: Record<string, unknown>): string {
   return String(part?.status ?? "—");
 }
 
+/** Format a numeric-ish value (number/string/Decimal) or return null. */
+function num(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** "12" for whole numbers, otherwise up to 2 decimals. */
+function fmtQty(value: unknown): string | null {
+  const n = num(value);
+  if (n == null) return null;
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+/** "$1,234.56" money formatting, or null. */
+function fmtMoney(value: unknown): string | null {
+  const n = num(value);
+  if (n == null) return null;
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** A single "Invoice X vs Source Y" comparison line inside a sub-status card. */
+function CompareLine({ label, invoice, source }: { label: string; invoice: string | null; source: string | null }) {
+  if (invoice == null && source == null) return null;
+  return (
+    <p className="mt-1 text-xs text-slate-500">
+      {label}: <span className="font-medium text-slate-700">{invoice ?? "—"}</span>
+      <span className="text-slate-400"> vs </span>
+      <span className="font-medium text-slate-700">{source ?? "—"}</span>
+    </p>
+  );
+}
+
 export default function MatchingResult({ matchResult }: MatchingResultProps) {
   if (!matchResult) {
     return <p className="text-sm text-slate-400">Matching has not run for this invoice yet.</p>;
   }
 
   const threeWay = matchResult.threeWayMatch;
-  const poStatus = subStatus(matchResult.poMatch);
-  const grStatus = subStatus(matchResult.grMatch);
+  const poMatch = matchResult.poMatch ?? undefined;
+  const grMatch = matchResult.grMatch ?? undefined;
+  const poStatus = subStatus(poMatch);
+  const grStatus = subStatus(grMatch);
   const discrepancies = matchResult.discrepancies ?? [];
 
   return (
@@ -63,10 +98,30 @@ export default function MatchingResult({ matchResult }: MatchingResultProps) {
         <div className={`rounded-md border px-3 py-2 ${subTone(poStatus)}`}>
           <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Purchase order</p>
           <p className="mt-0.5 font-semibold text-slate-800">{humanize(poStatus)}</p>
+          <CompareLine
+            label="Amount (Invoice vs PO)"
+            invoice={fmtMoney(poMatch?.amountInvoiced)}
+            source={fmtMoney(poMatch?.poAmount)}
+          />
+          <CompareLine
+            label="Quantity (Invoice vs PO)"
+            invoice={fmtQty(poMatch?.invoicedQuantity)}
+            source={fmtQty(poMatch?.poQuantity)}
+          />
         </div>
         <div className={`rounded-md border px-3 py-2 ${subTone(grStatus)}`}>
           <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Goods receipt</p>
           <p className="mt-0.5 font-semibold text-slate-800">{humanize(grStatus)}</p>
+          <CompareLine
+            label="Quantity (Invoice vs GR)"
+            invoice={fmtQty(grMatch?.quantityInvoiced)}
+            source={fmtQty(grMatch?.quantityReceived)}
+          />
+          <CompareLine
+            label="Amount (Invoice vs GR)"
+            invoice={fmtMoney(grMatch?.amountInvoiced)}
+            source={fmtMoney(grMatch?.amountReceived)}
+          />
         </div>
       </div>
 

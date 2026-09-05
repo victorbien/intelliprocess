@@ -252,7 +252,9 @@ Resources:
       Timeout: 300
       MemorySize: 512
       Policies:
-        - S3ReadPolicy: { BucketName: !Ref DocumentBucketName }
+        # CRUD (not just Read): the processor moves objects between the
+        # incoming/ processed/ failed/ stage folders (copy + delete).
+        - S3CrudPolicy: { BucketName: !Ref DocumentBucketName }
         - DynamoDBCrudPolicy: { TableName: !Ref InvoicesTable }
         - DynamoDBReadPolicy: { TableName: !Ref PurchaseOrdersTable }
         - DynamoDBReadPolicy: { TableName: !Ref GoodsReceiptsTable }

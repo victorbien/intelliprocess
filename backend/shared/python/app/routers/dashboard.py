@@ -28,7 +28,13 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.middleware import AppError, CurrentUser, require_role
-from app.models.enums import INVOICE_CONTENT_TYPES, MAX_FILE_SIZE_BYTES, UserRole
+from app.models.enums import (
+    DocumentType,
+    INVOICE_CONTENT_TYPES,
+    MAX_FILE_SIZE_BYTES,
+    S3Stage,
+    UserRole,
+)
 from app.models.schemas import (
     ApiResponse,
     ApprovalSettings,
@@ -53,6 +59,7 @@ from app.services.extraction import (
     poll_bda_status,
     start_bda_job,
 )
+from app.services.s3 import S3Client, restage_key
 from app.services.settings_store import get_approval_settings, put_approval_settings
 
 # Synchronous wait budget before falling back to async polling. Kept below the
@@ -70,6 +77,7 @@ gr_router = APIRouter()
 _invoice_db = DynamoClient(settings.INVOICE_TABLE)
 _po_db = DynamoClient(settings.PO_TABLE)
 _gr_db = DynamoClient(settings.GR_TABLE)
+_s3 = S3Client()
 
 # Attributes needed to compute dashboard statistics (keeps the scan lean).
 # ``extraction`` and ``matchResult`` are nested maps projected by their
@@ -149,9 +157,13 @@ async def seed_data(
     purchase_orders, goods_receipts = default_seed_data()
 
     try:
-        po_count = _write_records(_po_db, purchase_orders, numeric_fields=("totalAmount",))
+        po_count = _write_records(
+            _po_db, purchase_orders, numeric_fields=("totalAmount", "totalQuantity")
+        )
         gr_count = _write_records(
-            _gr_db, goods_receipts, numeric_fields=("totalQuantityReceived",)
+            _gr_db,
+            goods_receipts,
+            numeric_fields=("totalQuantityReceived", "totalAmount"),
         )
     except (ClientError, BotoCoreError) as exc:
         logger.error("Seed data write failed", extra={"error": str(exc)})
@@ -283,6 +295,7 @@ async def upload_purchase_order(
         "poNumber": body.po_number,
         "vendorName": body.vendor_name,
         "totalAmount": Decimal(str(body.total_amount)),
+        "totalQuantity": Decimal(str(body.total_quantity)),
         "currency": body.currency,
         "createdDate": created_date,
         "status": "OPEN",
@@ -310,44 +323,77 @@ async def upload_purchase_order(
 # ── Upload-and-extract helpers ────────────────────────────────────────────────
 
 
-def _encode_job(invocation_arn: str, kind: str) -> str:
-    """Encode an async extract job into an opaque stateless token."""
-    raw = json.dumps({"arn": invocation_arn, "kind": kind}).encode()
+def _encode_job(invocation_arn: str, kind: str, s3_key: str | None = None) -> str:
+    """Encode an async extract job into an opaque stateless token.
+
+    Carries the incoming ``s3_key`` so the status endpoint can move the object
+    to processed/failed once the async job resolves.
+    """
+    raw = json.dumps({"arn": invocation_arn, "kind": kind, "s3Key": s3_key}).encode()
     return base64.urlsafe_b64encode(raw).decode()
 
 
-def _decode_job(token: str, expected_kind: str) -> str:
-    """Decode a job token, returning its invocation ARN. Raises AppError if bad."""
+def _decode_job(token: str, expected_kind: str) -> tuple[str, str | None]:
+    """Decode a job token → (invocation_arn, s3_key). Raises AppError if bad."""
     try:
         data = json.loads(base64.urlsafe_b64decode(token.encode()))
         if data.get("kind") != expected_kind or not data.get("arn"):
             raise ValueError("token mismatch")
-        return str(data["arn"])
+        return str(data["arn"]), data.get("s3Key")
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise AppError("Invalid or expired job id.", status_code=400) from exc
 
 
+def _restage_upload(s3_key: str | None, stage: str) -> None:
+    """Best-effort move of an uploaded PO/GR object to processed/failed.
+
+    Never raises: a storage-housekeeping failure must not turn a successful
+    extraction into an error response for the admin.
+    """
+    if not s3_key:
+        return
+    dest = restage_key(s3_key, stage)
+    if dest == s3_key:
+        return
+    try:
+        _s3.move_object(s3_key, dest)
+    except Exception as exc:  # noqa: BLE001 — best-effort housekeeping
+        logger.error(
+            "Failed to restage uploaded document",
+            extra={"from": s3_key, "toStage": stage, "error": str(exc)},
+        )
+
+
+def _sum_line_item_quantities(extraction: dict) -> float:
+    """Sum the quantity across all extracted line items (0.0 if none)."""
+    line_items = extraction.get("lineItems") or []
+    return sum(
+        float(li.get("quantity", 0))
+        for li in line_items
+        if isinstance(li, dict) and isinstance(li.get("quantity"), (int, float))
+    )
+
+
 def _map_po(extraction: dict) -> PurchaseOrderExtractResponse:
     total = extraction.get("totalAmount")
+    total_qty = _sum_line_item_quantities(extraction)
     return PurchaseOrderExtractResponse(
         poNumber=_clean_str(extraction.get("invoiceNumber")),
         vendorName=_clean_str(extraction.get("vendorName")),
         totalAmount=float(total) if isinstance(total, (int, float)) and total else None,
+        totalQuantity=total_qty if total_qty > 0 else None,
         overallConfidence=extraction.get("overallConfidence"),
     )
 
 
 def _map_gr(extraction: dict) -> GoodsReceiptExtractResponse:
-    line_items = extraction.get("lineItems") or []
-    total_qty = sum(
-        float(li.get("quantity", 0))
-        for li in line_items
-        if isinstance(li, dict) and isinstance(li.get("quantity"), (int, float))
-    )
+    total = extraction.get("totalAmount")
+    total_qty = _sum_line_item_quantities(extraction)
     return GoodsReceiptExtractResponse(
         grId=_clean_str(extraction.get("invoiceNumber")),
         poNumber=_clean_str(extraction.get("poReference")),
         totalQuantityReceived=total_qty if total_qty > 0 else None,
+        totalAmount=float(total) if isinstance(total, (int, float)) and total else None,
         overallConfidence=extraction.get("overallConfidence"),
     )
 
@@ -395,26 +441,30 @@ async def extract_purchase_order(
     logger.info("PO extract requested", extra={"userId": user.user_id, "fileName": filename})
 
     try:
-        extraction = extract_from_bytes(
+        extraction, s3_key = extract_from_bytes(
             file_bytes=data,
             filename=filename,
-            prefix="po-uploads",
+            prefix=DocumentType.PURCHASE_ORDER,
             content_type=content_type,
             timeout_s=_SYNC_EXTRACT_TIMEOUT_S,
         )
     except ExtractionTimeout as pending:
-        token = _encode_job(pending.invocation_arn, "po")
+        # Still running: hand off to async polling; the status endpoint moves
+        # the object once the job resolves.
+        token = _encode_job(pending.invocation_arn, "po", pending.s3_key)
         return JSONResponse(
             status_code=202,
             content=ApiResponse(status_code=202, data=ExtractPending(jobId=token)).model_dump(by_alias=True),
         )
     except ExtractionError as exc:
         logger.error("PO extraction failed", extra={"reason": str(exc)})
+        _restage_upload(getattr(exc, "s3_key", None), S3Stage.FAILED)
         raise AppError(
             "Could not extract details from the document. Enter the fields manually.",
             status_code=422,
         )
 
+    _restage_upload(s3_key, S3Stage.PROCESSED)
     return ApiResponse(data=_map_po(extraction))
 
 
@@ -424,7 +474,7 @@ async def po_extract_status(
     job_id: Annotated[str, Query(alias="jobId")],
 ):
     """Poll a pending PO extraction job. Returns 200 (fields), 202 (pending), or 422."""
-    invocation_arn = _decode_job(job_id, "po")
+    invocation_arn, s3_key = _decode_job(job_id, "po")
     try:
         status = poll_bda_status(invocation_arn)
     except ExtractionError as exc:
@@ -437,12 +487,14 @@ async def po_extract_status(
             content=ApiResponse(status_code=202, data=ExtractPending(jobId=job_id)).model_dump(by_alias=True),
         )
     if status == "Failed":
+        _restage_upload(s3_key, S3Stage.FAILED)
         raise AppError(
             "Could not extract details from the document. Enter the fields manually.",
             status_code=422,
         )
 
     extraction = finalize_bda_job(invocation_arn)
+    _restage_upload(s3_key, S3Stage.PROCESSED)
     return ApiResponse(data=_map_po(extraction))
 
 
@@ -500,6 +552,7 @@ async def upload_goods_receipt(
         "grId": body.gr_id,
         "poNumber": body.po_number,
         "totalQuantityReceived": Decimal(str(body.total_quantity_received)),
+        "totalAmount": Decimal(str(body.total_amount)),
         "receivedDate": received_date,
         "status": body.status,
     }
@@ -541,26 +594,28 @@ async def extract_goods_receipt(
     logger.info("GR extract requested", extra={"userId": user.user_id, "fileName": filename})
 
     try:
-        extraction = extract_from_bytes(
+        extraction, s3_key = extract_from_bytes(
             file_bytes=data,
             filename=filename,
-            prefix="gr-uploads",
+            prefix=DocumentType.GOODS_RECEIPT,
             content_type=content_type,
             timeout_s=_SYNC_EXTRACT_TIMEOUT_S,
         )
     except ExtractionTimeout as pending:
-        token = _encode_job(pending.invocation_arn, "gr")
+        token = _encode_job(pending.invocation_arn, "gr", pending.s3_key)
         return JSONResponse(
             status_code=202,
             content=ApiResponse(status_code=202, data=ExtractPending(jobId=token)).model_dump(by_alias=True),
         )
     except ExtractionError as exc:
         logger.error("GR extraction failed", extra={"reason": str(exc)})
+        _restage_upload(getattr(exc, "s3_key", None), S3Stage.FAILED)
         raise AppError(
             "Could not extract details from the document. Enter the fields manually.",
             status_code=422,
         )
 
+    _restage_upload(s3_key, S3Stage.PROCESSED)
     return ApiResponse(data=_map_gr(extraction))
 
 
@@ -570,7 +625,7 @@ async def gr_extract_status(
     job_id: Annotated[str, Query(alias="jobId")],
 ):
     """Poll a pending GR extraction job. Returns 200 (fields), 202 (pending), or 422."""
-    invocation_arn = _decode_job(job_id, "gr")
+    invocation_arn, s3_key = _decode_job(job_id, "gr")
     try:
         status = poll_bda_status(invocation_arn)
     except ExtractionError as exc:
@@ -583,12 +638,14 @@ async def gr_extract_status(
             content=ApiResponse(status_code=202, data=ExtractPending(jobId=job_id)).model_dump(by_alias=True),
         )
     if status == "Failed":
+        _restage_upload(s3_key, S3Stage.FAILED)
         raise AppError(
             "Could not extract details from the document. Enter the fields manually.",
             status_code=422,
         )
 
     extraction = finalize_bda_job(invocation_arn)
+    _restage_upload(s3_key, S3Stage.PROCESSED)
     return ApiResponse(data=_map_gr(extraction))
 
 

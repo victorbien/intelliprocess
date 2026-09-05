@@ -457,6 +457,7 @@ class PurchaseOrderUploadRequest(BaseModel):
     po_number: str = Field(..., alias="poNumber", min_length=1, max_length=64)
     vendor_name: str = Field(..., alias="vendorName", min_length=1, max_length=255)
     total_amount: float = Field(..., alias="totalAmount", gt=0)
+    total_quantity: float = Field(..., alias="totalQuantity", gt=0)
     currency: str = Field("USD", min_length=3, max_length=3)
     created_date: str | None = Field(None, alias="createdDate")
     department: str | None = Field(None, max_length=128)
@@ -509,6 +510,7 @@ class GoodsReceiptUploadRequest(BaseModel):
     total_quantity_received: float = Field(
         ..., alias="totalQuantityReceived", gt=0
     )
+    total_amount: float = Field(..., alias="totalAmount", gt=0)
     received_date: str | None = Field(None, alias="receivedDate")
     status: str = Field("COMPLETE", max_length=32)
 
@@ -593,6 +595,7 @@ class PurchaseOrderExtractResponse(BaseModel):
     po_number: str | None = Field(None, alias="poNumber")
     vendor_name: str | None = Field(None, alias="vendorName")
     total_amount: float | None = Field(None, alias="totalAmount")
+    total_quantity: float | None = Field(None, alias="totalQuantity")
     overall_confidence: float | None = Field(None, alias="overallConfidence")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
@@ -610,6 +613,7 @@ class GoodsReceiptExtractResponse(BaseModel):
     gr_id: str | None = Field(None, alias="grId")
     po_number: str | None = Field(None, alias="poNumber")
     total_quantity_received: float | None = Field(None, alias="totalQuantityReceived")
+    total_amount: float | None = Field(None, alias="totalAmount")
     overall_confidence: float | None = Field(None, alias="overallConfidence")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}

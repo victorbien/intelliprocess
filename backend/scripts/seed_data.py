@@ -35,7 +35,7 @@ from app.services.dashboard import default_seed_data
 
 # Numeric fields that must be stored as Decimal in DynamoDB.
 _NUMERIC_FIELDS = frozenset(
-    {"totalAmount", "totalQuantityReceived"}
+    {"totalAmount", "totalQuantity", "totalQuantityReceived"}
 )
 
 

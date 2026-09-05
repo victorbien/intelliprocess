@@ -263,6 +263,7 @@ export const adminApi = {
     poNumber: string;
     vendorName: string;
     totalAmount: number;
+    totalQuantity: number;
     currency?: string;
     department?: string;
   }) => post<PurchaseOrderUploadResponse>("/purchase-orders/upload", body),
@@ -270,6 +271,7 @@ export const adminApi = {
     grId: string;
     poNumber: string;
     totalQuantityReceived: number;
+    totalAmount: number;
     status?: string;
   }) => post<GoodsReceiptUploadResponse>("/goods-receipts/upload", body),
   getSettings: () => get<ApprovalSettings>("/admin/settings"),

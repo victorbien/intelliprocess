@@ -13,7 +13,7 @@ import urllib.parse
 from typing import Any
 
 from app.config import settings
-from app.models.enums import INVOICE_CONTENT_TYPES, MAX_FILE_SIZE_BYTES
+from app.models.enums import INVOICE_CONTENT_TYPES, MAX_FILE_SIZE_BYTES, S3Stage
 from app.services.processor import process_invoice
 
 logger = logging.getLogger(__name__)
@@ -22,8 +22,8 @@ logger.setLevel(settings.LOG_LEVEL)
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-# Minimum valid S3 key parts: invoices/<document_id>/<filename>
-_MIN_KEY_PARTS = 3
+# Minimum valid S3 key parts: invoices/<stage>/<document_id>/<filename>
+_MIN_KEY_PARTS = 4
 
 
 # ── Lambda entry point ────────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ def _process_record(record: dict[str, Any]) -> dict[str, str]:
     key_parts = s3_key.strip("/").split("/")
     if len(key_parts) < _MIN_KEY_PARTS:
         logger.warning(
-            "S3 key does not match expected format invoices/<id>/<file>",
+            "S3 key does not match expected format invoices/<stage>/<id>/<file>",
             extra=log_ctx,
         )
         return {"key": s3_key, "status": "skipped", "reason": "Invalid key structure"}
@@ -130,6 +130,17 @@ def _process_record(record: dict[str, Any]) -> dict[str, str]:
     if prefix != "invoices":
         logger.info("Object not under invoices/ prefix — skipping", extra=log_ctx)
         return {"key": s3_key, "status": "skipped", "reason": "Not an invoice prefix"}
+
+    # Only process brand-new uploads in the "incoming" stage. When the pipeline
+    # moves an object to processed/ or failed/, S3 emits another ObjectCreated
+    # event; ignoring non-incoming stages prevents reprocessing loops.
+    stage = key_parts[1]
+    if stage != S3Stage.INCOMING:
+        logger.info(
+            "Object not in incoming stage — skipping",
+            extra={**log_ctx, "stage": stage},
+        )
+        return {"key": s3_key, "status": "skipped", "reason": f"Stage: {stage}"}
 
     # ── Validate file size ────────────────────────────────────────────────────
     if object_size > MAX_FILE_SIZE_BYTES:

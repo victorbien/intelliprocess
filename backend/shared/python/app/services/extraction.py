@@ -34,6 +34,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from app.config import settings
+from app.models.enums import S3Stage
 
 logger = logging.getLogger(__name__)
 
@@ -101,12 +102,15 @@ class ExtractionError(Exception):
 
 class ExtractionTimeout(Exception):
     """Raised when a bounded extraction wait elapses while the BDA job is still
-    running. Carries the ``invocation_arn`` so the caller can resume polling
-    asynchronously (sync-then-async fallback for the admin upload endpoints)."""
+    running. Carries the ``invocation_arn`` (to resume polling) and the
+    ``s3_key`` of the uploaded ``incoming`` object (so the caller can move it to
+    processed/failed once the async job resolves). Sync-then-async fallback for
+    the admin upload endpoints."""
 
-    def __init__(self, invocation_arn: str):
+    def __init__(self, invocation_arn: str, s3_key: str | None = None):
         super().__init__("Extraction still in progress")
         self.invocation_arn = invocation_arn
+        self.s3_key = s3_key
 
 
 def extract_invoice(bucket: str, s3_key: str) -> dict[str, Any]:
@@ -143,21 +147,22 @@ def start_bda_job(
     filename: str,
     prefix: str,
     content_type: str = "application/pdf",
-) -> str:
-    """Upload the document and start an async BDA job. Returns the invocation ARN.
+) -> tuple[str, str]:
+    """Upload the document to ``<prefix>/incoming/`` and start an async BDA job.
 
-    The invocation ARN is the only handle needed to poll and finalise later, so
-    it doubles as the async job token for the sync-then-async upload flow.
+    Returns ``(invocation_arn, s3_key)``. The invocation ARN is the handle used
+    to poll and finalise later; the s3_key is the ``incoming`` object key so the
+    caller can move it to ``processed``/``failed`` once the outcome is known.
     """
     import uuid as _uuid
 
-    from app.services.s3 import S3Client
+    from app.services.s3 import S3Client, build_stage_key
 
-    s3_key = f"{prefix}/{_uuid.uuid4()}/{filename}"
+    s3_key = build_stage_key(prefix, S3Stage.INCOMING, str(_uuid.uuid4()), filename)
 
     if settings.USE_MOCKS:
         logger.info("USE_MOCKS=true - mock BDA job started", extra={"s3Key": s3_key})
-        return f"{_MOCK_ARN_PREFIX}{s3_key}"
+        return f"{_MOCK_ARN_PREFIX}{s3_key}", s3_key
 
     s3 = S3Client()
     s3.upload_bytes(s3_key, file_bytes, content_type)
@@ -186,7 +191,7 @@ def start_bda_job(
 
     invocation_arn = response["invocationArn"]
     logger.info("BDA job started", extra={"invocationArn": invocation_arn})
-    return invocation_arn
+    return invocation_arn, s3_key
 
 
 def poll_bda_status(invocation_arn: str) -> str:
@@ -259,12 +264,16 @@ def extract_from_bytes(
     prefix: str,
     content_type: str = "application/pdf",
     timeout_s: float | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     """Extract invoice-shaped fields from an uploaded document.
 
-    Starts a BDA job and waits for it. If ``timeout_s`` is given and elapses
-    while the job is still running, raises ``ExtractionTimeout`` (carrying the
-    invocation ARN) so the caller can hand the job off to async polling.
+    Uploads to ``<prefix>/incoming/`` and starts a BDA job. If ``timeout_s`` is
+    given and elapses while the job is still running, raises
+    ``ExtractionTimeout`` (carrying the invocation ARN and the incoming s3_key)
+    so the caller can hand the job off to async polling.
+
+    Returns ``(extraction, s3_key)`` where ``s3_key`` is the uploaded incoming
+    object key, so the caller can move it to processed/failed.
 
     Reused by the admin PO/GR upload endpoints (Option A: the invoice blueprint
     also captures vendor / id / total, which map onto PO and GR fields).
@@ -274,18 +283,20 @@ def extract_from_bytes(
     # response comfortably under the API Gateway 29s ceiling.
     deadline = None if timeout_s is None else (time.monotonic() + timeout_s)
 
-    invocation_arn = start_bda_job(file_bytes, filename, prefix, content_type)
+    invocation_arn, s3_key = start_bda_job(file_bytes, filename, prefix, content_type)
 
     for _ in range(_BDA_MAX_POLLS):
         status = poll_bda_status(invocation_arn)
         if status == "Success":
-            return finalize_bda_job(invocation_arn)
+            return finalize_bda_job(invocation_arn), s3_key
         if status == "Failed":
-            raise ExtractionError("BDA job failed", retryable=True)
+            exc = ExtractionError("BDA job failed", retryable=True)
+            exc.s3_key = s3_key  # let the caller restage incoming -> failed
+            raise exc
         # Bail out to async BEFORE sleeping again if the next poll cycle would
         # risk exceeding the budget (leaves margin for finalize + response).
         if deadline is not None and time.monotonic() + _BDA_POLL_INTERVAL_S >= deadline:
-            raise ExtractionTimeout(invocation_arn)
+            raise ExtractionTimeout(invocation_arn, s3_key)
         time.sleep(_BDA_POLL_INTERVAL_S)
 
     raise ExtractionError(

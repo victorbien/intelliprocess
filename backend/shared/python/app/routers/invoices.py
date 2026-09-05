@@ -23,6 +23,7 @@ from app.models.enums import (
     DocumentType,
     InvoiceStatus,
     PRESIGNED_URL_EXPIRY_SECONDS,
+    S3Stage,
     UserRole,
 )
 from app.models.schemas import (
@@ -39,7 +40,7 @@ from app.models.schemas import (
 )
 from app.services.dynamo import DynamoClient
 from app.services.processor import process_invoice
-from app.services.s3 import S3Client
+from app.services.s3 import S3Client, build_stage_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -67,10 +68,14 @@ async def upload_invoice(
     Upon successful S3 upload, an S3 event triggers the InvoiceProcessor Lambda.
     """
     document_id = str(uuid.uuid4())
-    # Key format MUST be invoices/<document_id>/<filename>: the InvoiceProcessor
-    # derives the documentId from the second path segment to look up this
-    # invoice's metadata record (see functions/invoice_processor + processor.py).
-    s3_key = f"{DocumentType.INVOICE}/{document_id}/{body.file_name}"
+    # Key format MUST be invoices/incoming/<document_id>/<filename>: uploads
+    # land in the "incoming" stage folder and are moved to "processed"/"failed"
+    # by the processor. The InvoiceProcessor derives the documentId from the
+    # path segment after the stage (see functions/invoice_processor +
+    # processor.py).
+    s3_key = build_stage_key(
+        DocumentType.INVOICE, S3Stage.INCOMING, document_id, body.file_name
+    )
 
     logger.info(
         "Invoice upload initiated",

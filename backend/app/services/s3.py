@@ -7,9 +7,37 @@ import boto3
 from botocore.exceptions import ClientError
 
 from app.config import settings
-from app.models.enums import MAX_FILE_SIZE_BYTES, PRESIGNED_URL_EXPIRY_SECONDS
+from app.models.enums import MAX_FILE_SIZE_BYTES, PRESIGNED_URL_EXPIRY_SECONDS, S3Stage
 
 logger = logging.getLogger(__name__)
+
+# The set of stage folder names, used to detect and rewrite the stage segment
+# of a transaction document key.
+_STAGE_VALUES = frozenset(s.value for s in S3Stage)
+
+
+def build_stage_key(document_type: str, stage: str, *parts: str) -> str:
+    """Build a staged object key: ``<document_type>/<stage>/<parts...>``.
+
+    Example: ``build_stage_key("invoices", "incoming", doc_id, filename)``
+    -> ``invoices/incoming/<doc_id>/<filename>``.
+    """
+    segments = [document_type.strip("/"), stage.strip("/"), *[p.strip("/") for p in parts]]
+    return "/".join(s for s in segments if s)
+
+
+def restage_key(key: str, new_stage: str) -> str:
+    """Return ``key`` with its stage segment (2nd path component) swapped.
+
+    Assumes the key follows ``<document_type>/<stage>/<rest...>``. If the key
+    does not carry a recognised stage segment, the key is returned unchanged so
+    callers never crash on unexpected shapes.
+    """
+    parts = key.split("/")
+    if len(parts) >= 3 and parts[1] in _STAGE_VALUES:
+        parts[1] = new_stage
+        return "/".join(parts)
+    return key
 
 
 class S3Client:
@@ -106,6 +134,46 @@ class S3Client:
             logger.error(
                 "Failed to upload object to S3",
                 extra={"bucket": self._bucket, "key": key, "error": str(e)},
+            )
+            raise
+
+    def move_object(self, source_key: str, dest_key: str) -> str:
+        """Move an object within the bucket (server-side copy + delete).
+
+        Used to advance a transaction document through its processing-stage
+        folders, e.g. ``invoices/incoming/...`` -> ``invoices/processed/...``.
+
+        No-ops when ``source_key == dest_key``. If the source object does not
+        exist (e.g. it was already moved by a previous, partially-completed
+        run), the copy raises and is surfaced to the caller.
+
+        Returns the destination key on success.
+        """
+        if source_key == dest_key:
+            return dest_key
+
+        try:
+            client = self._get_client()
+            client.copy_object(
+                Bucket=self._bucket,
+                CopySource={"Bucket": self._bucket, "Key": source_key},
+                Key=dest_key,
+            )
+            client.delete_object(Bucket=self._bucket, Key=source_key)
+            logger.info(
+                "Moved S3 object",
+                extra={"bucket": self._bucket, "from": source_key, "to": dest_key},
+            )
+            return dest_key
+        except ClientError as e:
+            logger.error(
+                "Failed to move S3 object",
+                extra={
+                    "bucket": self._bucket,
+                    "from": source_key,
+                    "to": dest_key,
+                    "error": str(e),
+                },
             )
             raise
 

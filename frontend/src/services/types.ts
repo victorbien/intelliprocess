@@ -221,6 +221,7 @@ export interface PurchaseOrderExtract {
   poNumber?: string | null;
   vendorName?: string | null;
   totalAmount?: number | null;
+  totalQuantity?: number | null;
   overallConfidence?: number | null;
 }
 
@@ -230,6 +231,7 @@ export interface GoodsReceiptExtract {
   grId?: string | null;
   poNumber?: string | null;
   totalQuantityReceived?: number | null;
+  totalAmount?: number | null;
   overallConfidence?: number | null;
 }
 

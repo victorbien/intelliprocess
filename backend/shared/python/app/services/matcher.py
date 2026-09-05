@@ -6,10 +6,18 @@ Implements:
 - three_way_match()       — FR-AP-005, AC-3.5.x
 
 Business rules (from docs/02-functional-requirements.md):
-- PO amount tolerance:       5%   (FR-AP-003)
-- GR quantity tolerance:     2%   (FR-AP-004)
+- PO amount tolerance:       5%   (FR-AP-003)  — PO amount   vs Invoice amount
+- PO quantity tolerance:     2%   (FR-AP-003)  — PO quantity vs Invoice quantity
+- GR quantity tolerance:     2%   (FR-AP-004)  — GR quantity vs Invoice quantity
+- GR amount tolerance:       5%   (FR-AP-004)  — GR amount   vs Invoice amount
 - Three-way PASS requires PO=MATCHED and GR=CONFIRMED (AC-3.5.1)
 - Any failure → THREE_WAY_MATCH_FAIL  (AC-3.5.2)
+
+Four comparisons are performed across the two source documents:
+  1. Invoice amount   ↔ Purchase Order amount   (match_purchase_order)
+  2. Invoice quantity ↔ Purchase Order quantity (match_purchase_order)
+  3. Invoice quantity ↔ Goods Receipt quantity  (match_goods_receipt)
+  4. Invoice amount   ↔ Goods Receipt amount     (match_goods_receipt)
 
 All DynamoDB Decimal values are coerced to float before comparison.
 """
@@ -24,8 +32,10 @@ logger = logging.getLogger(__name__)
 
 # ── Tolerances ────────────────────────────────────────────────────────────────
 
-_PO_AMOUNT_TOLERANCE = 0.05   # 5 %  — FR-AP-003
-_GR_QTY_TOLERANCE    = 0.02   # 2 %  — FR-AP-004
+_PO_AMOUNT_TOLERANCE = 0.05   # 5 %  — FR-AP-003 (Invoice amount   vs PO amount)
+_PO_QTY_TOLERANCE    = 0.02   # 2 %  — FR-AP-003 (Invoice quantity vs PO quantity)
+_GR_QTY_TOLERANCE    = 0.02   # 2 %  — FR-AP-004 (Invoice quantity vs GR quantity)
+_GR_AMOUNT_TOLERANCE = 0.05   # 5 %  — FR-AP-004 (Invoice amount   vs GR amount)
 
 # Small epsilon so the tolerance boundary is inclusive and immune to floating-
 # point rounding (e.g. 658.80 * 1.05 yields a variance of 0.05000000000000004,
@@ -44,7 +54,9 @@ def match_purchase_order(
     po_number: str | None,
     vendor_name: str,
     invoice_amount: float,
+    invoiced_quantity: float = 0.0,
     amount_tolerance: float = _PO_AMOUNT_TOLERANCE,
+    qty_tolerance: float = _PO_QTY_TOLERANCE,
 ) -> dict[str, Any]:
     """Match an extracted invoice against a Purchase Order.
 
@@ -54,16 +66,23 @@ def match_purchase_order(
     2. If exact lookup fails (or ``po_number`` is None), fall back to a
        *fuzzy vendor-name* lookup via GSI-VendorDate and pick the PO whose
        amount is closest to the invoice amount.
-    3. Compare vendor name (case-insensitive substring check) and amount
-       (within ``_PO_AMOUNT_TOLERANCE``).
+    3. Compare vendor name (case-insensitive substring check), amount
+       (within ``amount_tolerance``) and quantity (Invoice quantity vs PO
+       quantity, within ``qty_tolerance``).
 
     Returns
     -------
-    ``{ status, poId, amountVariancePct, discrepancies }``
+    ``{ status, poId, amountVariancePct, quantityVariancePct, poQuantity,
+        invoicedQuantity, discrepancies }``
 
     ``status`` ∈ { "MATCHED", "PARTIAL_MATCH", "NO_MATCH" }
     """
-    log_ctx = {"poNumber": po_number, "vendorName": vendor_name, "invoiceAmount": invoice_amount}
+    log_ctx = {
+        "poNumber": po_number,
+        "vendorName": vendor_name,
+        "invoiceAmount": invoice_amount,
+        "invoicedQty": invoiced_quantity,
+    }
 
     # ── 1. Exact PO number lookup ──────────────────────────────────────────────
     po = None
@@ -97,6 +116,11 @@ def match_purchase_order(
                 "status": "NO_MATCH",
                 "poId": None,
                 "amountVariancePct": None,
+                "poAmount": None,
+                "amountInvoiced": invoice_amount,
+                "quantityVariancePct": None,
+                "poQuantity": None,
+                "invoicedQuantity": invoiced_quantity,
                 "discrepancies": ["PO not found"],
             }
 
@@ -125,6 +149,19 @@ def match_purchase_order(
             f"Vendor mismatch: PO='{po_vendor}', Invoice='{vendor_name}'"
         )
 
+    # ── Quantity check: Invoice quantity vs PO quantity ────────────────────────
+    # Only enforced when the PO carries a quantity and the invoice has one, so
+    # legacy PO records without ``totalQuantity`` do not fail the match.
+    po_quantity = _to_float(po.get("totalQuantity", 0))
+    qty_variance_pct: float | None = None
+    if po_quantity > 0 and invoiced_quantity > 0:
+        qty_variance_pct = abs(po_quantity - invoiced_quantity) / po_quantity
+        if qty_variance_pct > qty_tolerance + _FLOAT_EPSILON:
+            discrepancies.append(
+                f"Quantity variance {qty_variance_pct * 100:.1f}%: "
+                f"PO {po_quantity:.0f} vs Invoice {invoiced_quantity:.0f}"
+            )
+
     status = "MATCHED" if not discrepancies else "PARTIAL_MATCH"
 
     logger.info(
@@ -134,6 +171,7 @@ def match_purchase_order(
             "matchedPoId": po["poNumber"],
             "status": status,
             "variancePct": round(variance_pct, 4),
+            "qtyVariancePct": round(qty_variance_pct, 4) if qty_variance_pct is not None else None,
             "discrepancies": discrepancies,
         },
     )
@@ -142,6 +180,11 @@ def match_purchase_order(
         "status": status,
         "poId": po["poNumber"],
         "amountVariancePct": round(variance_pct, 4),
+        "poAmount": po_amount,
+        "amountInvoiced": invoice_amount,
+        "quantityVariancePct": round(qty_variance_pct, 4) if qty_variance_pct is not None else None,
+        "poQuantity": po_quantity if po_quantity > 0 else None,
+        "invoicedQuantity": invoiced_quantity,
         "discrepancies": discrepancies,
     }
 
@@ -149,19 +192,29 @@ def match_purchase_order(
 def match_goods_receipt(
     po_number: str | None,
     invoiced_quantity: float,
+    invoice_amount: float = 0.0,
     qty_tolerance: float = _GR_QTY_TOLERANCE,
+    amount_tolerance: float = _GR_AMOUNT_TOLERANCE,
 ) -> dict[str, Any]:
     """Verify that goods/services for a PO have been received.
 
-    Sums all GR quantities for the given PO (supports partial deliveries).
+    Sums all GR quantities (and amounts) for the given PO (supports partial
+    deliveries). Compares:
+      - Invoice quantity vs total GR quantity received (within ``qty_tolerance``)
+      - Invoice amount   vs total GR amount            (within ``amount_tolerance``)
 
     Returns
     -------
-    ``{ status, grId, quantityReceived, quantityInvoiced, discrepancies }``
+    ``{ status, grId, quantityReceived, quantityInvoiced, amountReceived,
+        amountInvoiced, amountVariancePct, discrepancies }``
 
     ``status`` ∈ { "CONFIRMED", "PARTIAL", "NOT_RECEIVED" }
     """
-    log_ctx = {"poNumber": po_number, "invoicedQty": invoiced_quantity}
+    log_ctx = {
+        "poNumber": po_number,
+        "invoicedQty": invoiced_quantity,
+        "invoiceAmount": invoice_amount,
+    }
 
     if not po_number:
         logger.info("GR check skipped — no PO number", extra=log_ctx)
@@ -170,6 +223,9 @@ def match_goods_receipt(
             "grId": None,
             "quantityReceived": 0.0,
             "quantityInvoiced": invoiced_quantity,
+            "amountReceived": 0.0,
+            "amountInvoiced": invoice_amount,
+            "amountVariancePct": None,
             "discrepancies": ["No PO number available for GR lookup"],
         }
 
@@ -188,11 +244,15 @@ def match_goods_receipt(
             "grId": None,
             "quantityReceived": 0.0,
             "quantityInvoiced": invoiced_quantity,
+            "amountReceived": 0.0,
+            "amountInvoiced": invoice_amount,
+            "amountVariancePct": None,
             "discrepancies": [f"No goods receipt found for PO {po_number}"],
         }
 
-    # Sum quantities across all GRs (handles split deliveries)
+    # Sum quantities and amounts across all GRs (handles split deliveries)
     total_received = sum(_to_float(gr.get("totalQuantityReceived", 0)) for gr in grs)
+    total_amount_received = sum(_to_float(gr.get("totalAmount", 0)) for gr in grs)
     first_gr_id = grs[0].get("grId")
 
     # Quantity tolerance (AC-3.4.2): invoiced ≤ received + tolerance %
@@ -209,12 +269,32 @@ def match_goods_receipt(
     else:
         status = "CONFIRMED"
 
+    # ── Amount check: Invoice amount vs GR amount ──────────────────────────────
+    # Only enforced when the GR carries an amount and the invoice has one, so
+    # legacy GR records without ``totalAmount`` do not fail the match.
+    amount_variance_pct: float | None = None
+    if total_amount_received > 0 and invoice_amount > 0:
+        amount_variance_pct = (
+            abs(total_amount_received - invoice_amount) / total_amount_received
+        )
+        if amount_variance_pct > amount_tolerance + _FLOAT_EPSILON:
+            discrepancies.append(
+                f"GR amount variance {amount_variance_pct * 100:.1f}%: "
+                f"GR ${total_amount_received:.2f} vs Invoice ${invoice_amount:.2f}"
+            )
+            # An amount mismatch downgrades a confirmed receipt to PARTIAL so the
+            # three-way match fails and the invoice is escalated.
+            if status == "CONFIRMED":
+                status = "PARTIAL"
+
     logger.info(
         "GR match result",
         extra={
             **log_ctx,
             "grId": first_gr_id,
             "totalReceived": total_received,
+            "totalAmountReceived": total_amount_received,
+            "amountVariancePct": round(amount_variance_pct, 4) if amount_variance_pct is not None else None,
             "status": status,
             "discrepancies": discrepancies,
         },
@@ -225,6 +305,9 @@ def match_goods_receipt(
         "grId": first_gr_id,
         "quantityReceived": total_received,
         "quantityInvoiced": invoiced_quantity,
+        "amountReceived": total_amount_received if total_amount_received > 0 else None,
+        "amountInvoiced": invoice_amount,
+        "amountVariancePct": round(amount_variance_pct, 4) if amount_variance_pct is not None else None,
         "discrepancies": discrepancies,
     }
 

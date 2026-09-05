@@ -24,6 +24,19 @@ class DocumentType(StrEnum):
     RECORD = "records"
 
 
+class S3Stage(StrEnum):
+    """Processing-stage sub-folders used under each transaction document type.
+
+    Every uploaded transaction document (invoice, purchase order, goods
+    receipt) is written under ``<type>/incoming/`` first, then moved to
+    ``<type>/processed/`` on success or ``<type>/failed/`` on failure.
+    """
+
+    INCOMING = "incoming"
+    PROCESSED = "processed"
+    FAILED = "failed"
+
+
 class UserRole(StrEnum):
     """Cognito user group roles."""
 

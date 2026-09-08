@@ -231,6 +231,7 @@ export interface PurchaseOrderListItem {
 
 /** Full Purchase Order detail for GET /purchase-orders/{poNumber}. */
 export interface PurchaseOrderDetail extends PurchaseOrderListItem {
+  documentUrl: any;
   department?: string | null;
   vendorId?: string | null;
 }

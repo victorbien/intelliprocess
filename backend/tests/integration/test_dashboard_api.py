@@ -181,6 +181,7 @@ class TestPurchaseOrderUpload:
                 "poNumber": "PO-2024-9999",
                 "vendorName": "New Vendor Inc.",
                 "totalAmount": 1234.56,
+                "totalQuantity": 12,
                 "department": "Ops",
             },
         )
@@ -191,6 +192,7 @@ class TestPurchaseOrderUpload:
         assert item["poNumber"] == "PO-2024-9999"
         assert isinstance(item["totalAmount"], Decimal)
         assert item["totalAmount"] == Decimal("1234.56")
+        assert item["totalQuantity"] == Decimal("12")
         assert item["createdDate"]  # auto-filled
 
     async def test_rejects_non_positive_amount(self):
@@ -217,7 +219,8 @@ class TestPurchaseOrderUpload:
 
         resp = await _post(
             "/purchase-orders/upload",
-            {"poNumber": "PO-2", "vendorName": "V", "totalAmount": 10, "currency": "usd"},
+            {"poNumber": "PO-2", "vendorName": "V", "totalAmount": 10,
+             "totalQuantity": 1, "currency": "usd"},
         )
 
         assert resp.status_code == 201
@@ -246,7 +249,8 @@ class TestGoodsReceiptUpload:
 
         resp = await _post(
             "/goods-receipts/upload",
-            {"grId": "GR-9999", "poNumber": "PO-2024-9999", "totalQuantityReceived": 40},
+            {"grId": "GR-9999", "poNumber": "PO-2024-9999",
+             "totalQuantityReceived": 40, "totalAmount": 1234.56},
         )
 
         assert resp.status_code == 201
@@ -266,7 +270,8 @@ class TestGoodsReceiptUpload:
 
         resp = await _post(
             "/goods-receipts/upload",
-            {"grId": "GR-9999", "poNumber": "PO-DOES-NOT-EXIST", "totalQuantityReceived": 40},
+            {"grId": "GR-9999", "poNumber": "PO-DOES-NOT-EXIST",
+             "totalQuantityReceived": 40, "totalAmount": 1234.56},
         )
 
         assert resp.status_code == 400

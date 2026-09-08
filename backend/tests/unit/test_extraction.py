@@ -12,8 +12,10 @@ Tests cover:
 """
 
 import json
+from typing import Any
+
 import pytest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 from botocore.exceptions import ClientError
 
@@ -21,14 +23,10 @@ from app.services.extraction import (
     ExtractionError,
     extract_invoice,
     _parse_bda_response,
-    _parse_table_block,
     _coerce_field,
     _safe_float,
-    _validate_bda_output,
     _validate_extraction_result,
-    _invoke_bda_with_retry,
     _poll_bda,
-    _read_bda_output_with_retry,
 )
 
 
@@ -43,35 +41,29 @@ def _client_error(code: str, message: str = "Error") -> ClientError:
     )
 
 
-def _make_bda_blocks(
-    fields: dict[str, str] | None = None,
-    table_rows: list[list[str]] | None = None,
-    confidence: float = 0.95,
+def _make_bda_output(
+    fields: dict[str, Any] | None = None,
+    service_table: list[dict] | None = None,
+    confidence: float | None = 0.95,
 ) -> dict:
-    """Build a minimal BDA output structure."""
-    blocks = []
+    """Build a minimal BDA custom-output document.
 
-    if fields:
-        for key, value in fields.items():
-            blocks.append({
-                "blockType": "KEY_VALUE_SET",
-                "key": {"text": key},
-                "value": {"text": value},
-                "geometry": {"confidence": confidence},
-            })
+    Mirrors the shape ``_parse_bda_response`` consumes: a top-level
+    ``inference_result`` dict keyed by blueprint field names (VENDORNAME, ID,
+    TOTAL, SERVICES_TABLE, ...) plus an optional ``explainability_info`` list
+    carrying per-field ``confidence`` values.
+    """
+    inference: dict[str, Any] = dict(fields or {})
+    if service_table is not None:
+        inference["SERVICES_TABLE"] = service_table
 
-    if table_rows:
-        rows = []
-        # Header row
-        rows.append({"cells": [
-            {"text": "Description"}, {"text": "Qty"},
-            {"text": "Unit Price"}, {"text": "Amount"},
-        ]})
-        for row in table_rows:
-            rows.append({"cells": [{"text": cell} for cell in row]})
-        blocks.append({"blockType": "TABLE", "rows": rows})
+    raw: dict[str, Any] = {"inference_result": inference}
 
-    return {"blocks": blocks}
+    if confidence is not None and fields:
+        raw["explainability_info"] = [
+            {key: {"confidence": confidence} for key in fields}
+        ]
+    return raw
 
 
 # ── Mock mode tests ───────────────────────────────────────────────────────────
@@ -132,143 +124,45 @@ class TestMockMode:
 # ── BDA invocation with retry ─────────────────────────────────────────────────
 
 
-class TestInvokeBdaWithRetry:
-    """Tests for _invoke_bda_with_retry retry logic."""
-
-    @patch("time.sleep")  # Skip actual delays in tests
-    def test_success_on_first_attempt(self, mock_sleep):
-        """Successful invocation on first try returns the ARN."""
-        mock_runtime = MagicMock()
-        mock_runtime.invoke_data_automation_async.return_value = {
-            "invocationArn": "arn:aws:bedrock:us-east-1:123:invocation/test-123"
-        }
-
-        result = _invoke_bda_with_retry(
-            runtime=mock_runtime,
-            s3_input_uri="s3://bucket/key",
-            s3_output_uri="s3://bucket/output",
-        )
-
-        assert result == "arn:aws:bedrock:us-east-1:123:invocation/test-123"
-        assert mock_runtime.invoke_data_automation_async.call_count == 1
-        mock_sleep.assert_not_called()
-
-    @patch("time.sleep")
-    def test_retries_on_throttling_then_succeeds(self, mock_sleep):
-        """Throttling on first attempt, success on retry."""
-        mock_runtime = MagicMock()
-        mock_runtime.invoke_data_automation_async.side_effect = [
-            _client_error("ThrottlingException", "Rate exceeded"),
-            {"invocationArn": "arn:aws:bedrock:us-east-1:123:invocation/retry-ok"},
-        ]
-
-        result = _invoke_bda_with_retry(
-            runtime=mock_runtime,
-            s3_input_uri="s3://bucket/key",
-            s3_output_uri="s3://bucket/output",
-        )
-
-        assert result == "arn:aws:bedrock:us-east-1:123:invocation/retry-ok"
-        assert mock_runtime.invoke_data_automation_async.call_count == 2
-        mock_sleep.assert_called_once_with(1.0)  # First retry delay
-
-    @patch("time.sleep")
-    def test_retries_twice_then_succeeds(self, mock_sleep):
-        """Two transient failures, then success on third attempt."""
-        mock_runtime = MagicMock()
-        mock_runtime.invoke_data_automation_async.side_effect = [
-            _client_error("ServiceUnavailableException"),
-            _client_error("InternalServerException"),
-            {"invocationArn": "arn:third-try"},
-        ]
-
-        result = _invoke_bda_with_retry(
-            runtime=mock_runtime,
-            s3_input_uri="s3://b/k",
-            s3_output_uri="s3://b/o",
-        )
-
-        assert result == "arn:third-try"
-        assert mock_runtime.invoke_data_automation_async.call_count == 3
-        # Backoff: 1s then 2s
-        assert mock_sleep.call_args_list == [call(1.0), call(2.0)]
-
-    @patch("time.sleep")
-    def test_exhausts_retries_raises_extraction_error(self, mock_sleep):
-        """All retries exhausted → ExtractionError with retryable=True."""
-        mock_runtime = MagicMock()
-        mock_runtime.invoke_data_automation_async.side_effect = _client_error(
-            "ThrottlingException", "Persistent throttle"
-        )
-
-        with pytest.raises(ExtractionError) as exc_info:
-            _invoke_bda_with_retry(
-                runtime=mock_runtime,
-                s3_input_uri="s3://b/k",
-                s3_output_uri="s3://b/o",
-            )
-
-        assert exc_info.value.retryable is True
-        assert "Persistent throttle" in str(exc_info.value)
-        # 1 initial + 2 retries = 3 total attempts
-        assert mock_runtime.invoke_data_automation_async.call_count == 3
-
-    @patch("time.sleep")
-    def test_non_retryable_error_fails_immediately(self, mock_sleep):
-        """Non-retryable errors (e.g., ValidationException) fail on first attempt."""
-        mock_runtime = MagicMock()
-        mock_runtime.invoke_data_automation_async.side_effect = _client_error(
-            "ValidationException", "Invalid input configuration"
-        )
-
-        with pytest.raises(ExtractionError) as exc_info:
-            _invoke_bda_with_retry(
-                runtime=mock_runtime,
-                s3_input_uri="s3://b/k",
-                s3_output_uri="s3://b/o",
-            )
-
-        assert exc_info.value.retryable is False
-        assert mock_runtime.invoke_data_automation_async.call_count == 1
-        mock_sleep.assert_not_called()
-
-
-# ── BDA polling ───────────────────────────────────────────────────────────────
-
-
 class TestPollBda:
-    """Tests for _poll_bda status polling."""
+    """Tests for _poll_bda status polling.
+
+    Current BDA status vocabulary is InProgress / Success / ServiceError /
+    ClientError. _poll_bda sleeps at the top of each iteration, returns the full
+    status dict on Success, raises on ServiceError (retryable) / ClientError
+    (non-retryable), and re-raises any boto3 ClientError from the status call.
+    """
 
     @patch("time.sleep")
     def test_success_on_first_poll(self, mock_sleep):
-        """BDA reports SUCCESS on first poll → returns normally."""
+        """BDA reports Success on first poll → returns the status dict."""
         mock_runtime = MagicMock()
-        mock_runtime.get_data_automation_status.return_value = {"status": "SUCCESS"}
+        mock_runtime.get_data_automation_status.return_value = {"status": "Success"}
 
-        # Should not raise
-        _poll_bda(mock_runtime, "arn:test")
+        result = _poll_bda(mock_runtime, "arn:test")
+        assert result == {"status": "Success"}
         assert mock_runtime.get_data_automation_status.call_count == 1
 
     @patch("time.sleep")
     def test_in_progress_then_success(self, mock_sleep):
-        """Multiple IN_PROGRESS polls followed by SUCCESS."""
+        """Multiple InProgress polls followed by Success."""
         mock_runtime = MagicMock()
         mock_runtime.get_data_automation_status.side_effect = [
-            {"status": "IN_PROGRESS"},
-            {"status": "IN_PROGRESS"},
-            {"status": "SUCCESS"},
+            {"status": "InProgress"},
+            {"status": "InProgress"},
+            {"status": "Success"},
         ]
 
         _poll_bda(mock_runtime, "arn:test")
         assert mock_runtime.get_data_automation_status.call_count == 3
 
     @patch("time.sleep")
-    def test_failed_status_raises_extraction_error(self, mock_sleep):
-        """BDA FAILED status → ExtractionError with the failure reason."""
+    def test_client_error_status_raises_non_retryable(self, mock_sleep):
+        """BDA ClientError status → ExtractionError with retryable=False."""
         mock_runtime = MagicMock()
         mock_runtime.get_data_automation_status.return_value = {
-            "status": "FAILED",
-            "failureReason": "Document is corrupted",
+            "status": "ClientError",
+            "errorMessage": "Document is corrupted",
         }
 
         with pytest.raises(ExtractionError) as exc_info:
@@ -279,11 +173,11 @@ class TestPollBda:
 
     @patch("time.sleep")
     def test_service_error_is_retryable(self, mock_sleep):
-        """BDA SERVICE_ERROR status → ExtractionError with retryable=True."""
+        """BDA ServiceError status → ExtractionError with retryable=True."""
         mock_runtime = MagicMock()
         mock_runtime.get_data_automation_status.return_value = {
-            "status": "SERVICE_ERROR",
-            "failureReason": "Internal service issue",
+            "status": "ServiceError",
+            "errorMessage": "Internal service issue",
         }
 
         with pytest.raises(ExtractionError) as exc_info:
@@ -296,30 +190,18 @@ class TestPollBda:
     def test_timeout_raises_extraction_error(self, mock_sleep):
         """Exceeding max polls → timeout ExtractionError."""
         mock_runtime = MagicMock()
-        mock_runtime.get_data_automation_status.return_value = {"status": "IN_PROGRESS"}
+        mock_runtime.get_data_automation_status.return_value = {"status": "InProgress"}
 
         with pytest.raises(ExtractionError) as exc_info:
             _poll_bda(mock_runtime, "arn:test")
 
         assert "timed out" in str(exc_info.value)
         assert exc_info.value.retryable is True
+        assert mock_runtime.get_data_automation_status.call_count == 3
 
     @patch("time.sleep")
-    def test_transient_poll_error_is_tolerated(self, mock_sleep):
-        """Transient ClientError during polling is tolerated, polling continues."""
-        mock_runtime = MagicMock()
-        mock_runtime.get_data_automation_status.side_effect = [
-            _client_error("ThrottlingException"),
-            {"status": "SUCCESS"},
-        ]
-
-        # Should not raise
-        _poll_bda(mock_runtime, "arn:test")
-        assert mock_runtime.get_data_automation_status.call_count == 2
-
-    @patch("time.sleep")
-    def test_non_transient_poll_error_raises(self, mock_sleep):
-        """Non-transient ClientError during polling raises immediately."""
+    def test_client_error_exception_raises(self, mock_sleep):
+        """A boto3 ClientError from the status call is wrapped and raised."""
         mock_runtime = MagicMock()
         mock_runtime.get_data_automation_status.side_effect = _client_error(
             "AccessDeniedException", "No permission"
@@ -329,89 +211,21 @@ class TestPollBda:
             _poll_bda(mock_runtime, "arn:test")
 
         assert "No permission" in str(exc_info.value)
-        assert exc_info.value.retryable is False
-
-
-# ── BDA output reading with retry ─────────────────────────────────────────────
-
-
-class TestReadBdaOutputWithRetry:
-    """Tests for _read_bda_output_with_retry."""
-
-    @patch("time.sleep")
-    @patch("boto3.client")
-    def test_success_on_first_read(self, mock_boto_client, mock_sleep):
-        """S3 read succeeds on first try."""
-        mock_s3 = MagicMock()
-        mock_boto_client.return_value = mock_s3
-        mock_s3.get_object.return_value = {
-            "Body": MagicMock(read=lambda: json.dumps({"blocks": []}).encode())
-        }
-
-        result = _read_bda_output_with_retry("test-bucket", "invoices/id/file.pdf")
-        assert result == {"blocks": []}
-        mock_sleep.assert_not_called()
-
-    @patch("time.sleep")
-    @patch("boto3.client")
-    def test_retries_on_transient_error(self, mock_boto_client, mock_sleep):
-        """Transient S3 error on first read, success on retry."""
-        mock_s3 = MagicMock()
-        mock_boto_client.return_value = mock_s3
-        mock_s3.get_object.side_effect = [
-            _client_error("ServiceUnavailableException"),
-            {"Body": MagicMock(read=lambda: json.dumps({"blocks": []}).encode())},
-        ]
-
-        result = _read_bda_output_with_retry("bucket", "invoices/id/f.pdf")
-        assert result == {"blocks": []}
-        mock_sleep.assert_called_once_with(1.0)
-
-    @patch("time.sleep")
-    @patch("boto3.client")
-    def test_no_such_key_fails_immediately(self, mock_boto_client, mock_sleep):
-        """NoSuchKey error fails immediately without retry."""
-        mock_s3 = MagicMock()
-        mock_boto_client.return_value = mock_s3
-        mock_s3.get_object.side_effect = _client_error("NoSuchKey", "Key not found")
-
-        with pytest.raises(ExtractionError) as exc_info:
-            _read_bda_output_with_retry("bucket", "invoices/id/f.pdf")
-
-        assert exc_info.value.retryable is False
-        assert "not found" in str(exc_info.value)
-        mock_sleep.assert_not_called()
-
-    @patch("time.sleep")
-    @patch("boto3.client")
-    def test_invalid_json_fails_immediately(self, mock_boto_client, mock_sleep):
-        """Invalid JSON content fails without retry."""
-        mock_s3 = MagicMock()
-        mock_boto_client.return_value = mock_s3
-        mock_s3.get_object.return_value = {
-            "Body": MagicMock(read=lambda: b"not valid json {{{")
-        }
-
-        with pytest.raises(ExtractionError) as exc_info:
-            _read_bda_output_with_retry("bucket", "invoices/id/f.pdf")
-
-        assert "not valid JSON" in str(exc_info.value)
-        assert exc_info.value.retryable is False
 
 
 # ── BDA response parsing ──────────────────────────────────────────────────────
 
 
 class TestParseBdaResponse:
-    """Tests for _parse_bda_response normalization."""
+    """Tests for _parse_bda_response normalization (inference_result format)."""
 
     def test_extracts_key_value_fields(self):
-        """KEY_VALUE_SET blocks are mapped to canonical field names."""
-        raw = _make_bda_blocks(
+        """Blueprint fields are mapped to canonical field names."""
+        raw = _make_bda_output(
             fields={
-                "Vendor Name": "Acme Corp",
-                "Invoice Number": "INV-001",
-                "Total Amount": "$1,234.56",
+                "VENDORNAME": "Acme Corp",
+                "ID": "INV-001",
+                "TOTAL": "$1,234.56",
             }
         )
         result = _parse_bda_response(raw)
@@ -420,13 +234,15 @@ class TestParseBdaResponse:
         assert result["invoiceNumber"] == "INV-001"
         assert result["totalAmount"] == 1234.56
 
-    def test_extracts_table_as_line_items(self):
-        """TABLE blocks are parsed into lineItems list."""
-        raw = _make_bda_blocks(
-            fields={"Vendor Name": "Test"},
-            table_rows=[
-                ["Widget A", "10", "$5.00", "$50.00"],
-                ["Widget B", "3", "$20.00", "$60.00"],
+    def test_extracts_service_table_as_line_items(self):
+        """SERVICES_TABLE rows are parsed into the lineItems list."""
+        raw = _make_bda_output(
+            fields={"VENDORNAME": "Test"},
+            service_table=[
+                {"product description": "Widget A", "quantity": "10",
+                 "unit price": "$5.00", "amount": "$50.00"},
+                {"product description": "Widget B", "quantity": "3",
+                 "unit price": "$20.00", "amount": "$60.00"},
             ],
         )
         result = _parse_bda_response(raw)
@@ -439,48 +255,65 @@ class TestParseBdaResponse:
 
     def test_computes_overall_confidence(self):
         """Overall confidence is the mean of all per-field confidences."""
-        raw = _make_bda_blocks(
-            fields={"Vendor Name": "A", "Invoice Number": "B"},
+        raw = _make_bda_output(
+            fields={"VENDORNAME": "A", "ID": "B"},
             confidence=0.90,
         )
         result = _parse_bda_response(raw)
 
         assert result["overallConfidence"] == 0.9
 
-    def test_empty_blocks_returns_empty_extraction(self):
-        """No blocks → empty extraction with zero confidence."""
-        raw = {"blocks": []}
+    def test_tax_array_is_summed(self):
+        """A TAX list is summed into a single taxAmount."""
+        raw = _make_bda_output(fields={"VENDORNAME": "A"}, confidence=None)
+        raw["inference_result"]["TAX"] = ["10.00", "5.50"]
+        result = _parse_bda_response(raw)
+
+        assert result["taxAmount"] == 15.50
+
+    def test_empty_inference_returns_empty_extraction(self):
+        """No fields → empty extraction with zero confidence."""
+        raw = {"inference_result": {}}
         result = _parse_bda_response(raw)
 
         assert result["lineItems"] == []
         assert result["confidence"] == {}
         assert result["overallConfidence"] == 0.0
 
+    def test_expected_fields_always_present(self):
+        """Downstream-expected fields are always present (None when absent)."""
+        result = _parse_bda_response({"inference_result": {"VENDORNAME": "X"}})
+        for key in ("vendorName", "invoiceNumber", "invoiceDate", "dueDate",
+                    "poReference", "subtotal", "taxAmount", "totalAmount",
+                    "paymentTerms"):
+            assert key in result
+        assert result["vendorName"] == "X"
+        assert result["dueDate"] is None
+
     def test_unknown_fields_are_ignored(self):
-        """BDA fields not in _FIELD_MAP are silently ignored."""
-        raw = _make_bda_blocks(fields={"Unknown Field": "value", "Vendor Name": "X"})
+        """Blueprint keys not in _BP_FIELD_MAP are silently ignored."""
+        raw = _make_bda_output(fields={"UNKNOWNFIELD": "value", "VENDORNAME": "X"})
         result = _parse_bda_response(raw)
 
         assert "unknownField" not in result
+        assert "UNKNOWNFIELD" not in result
         assert result["vendorName"] == "X"
 
-    def test_missing_blocks_key(self):
-        """Raw output without 'blocks' key produces empty extraction."""
-        raw = {"otherData": "something"}
+    def test_missing_inference_result_key(self):
+        """Raw output is treated as the inference dict when the key is absent."""
+        raw = {"VENDORNAME": "Direct"}
         result = _parse_bda_response(raw)
 
+        assert result["vendorName"] == "Direct"
         assert result["lineItems"] == []
-        assert result["overallConfidence"] == 0.0
 
     def test_numeric_fields_are_coerced_to_float(self):
         """Fields like totalAmount, subtotal, taxAmount become floats."""
-        raw = _make_bda_blocks(
-            fields={
-                "Total Amount": "2,500.99",
-                "Subtotal": "$2,300.00",
-                "Tax Amount": "200.99",
-            }
+        raw = _make_bda_output(
+            fields={"TOTAL": "2,500.99", "SUBTOTAL": "$2,300.00"},
+            confidence=None,
         )
+        raw["inference_result"]["TAX"] = "200.99"
         result = _parse_bda_response(raw)
 
         assert result["totalAmount"] == 2500.99
@@ -489,8 +322,8 @@ class TestParseBdaResponse:
 
     def test_confidence_per_field(self):
         """Per-field confidence is stored in the confidence dict."""
-        raw = _make_bda_blocks(
-            fields={"Vendor Name": "V", "Invoice Number": "I"},
+        raw = _make_bda_output(
+            fields={"VENDORNAME": "V", "ID": "I"},
             confidence=0.88,
         )
         result = _parse_bda_response(raw)
@@ -499,50 +332,71 @@ class TestParseBdaResponse:
         assert result["confidence"]["invoiceNumber"] == 0.88
 
 
-# ── Table block parsing ───────────────────────────────────────────────────────
+# ── SERVICES_TABLE line-item parsing ──────────────────────────────────────────
 
 
 class TestParseTableBlock:
-    """Tests for _parse_table_block."""
+    """Tests for SERVICES_TABLE line-item parsing (via _parse_bda_response).
 
-    def test_skips_header_row(self):
-        """First row is treated as header and skipped."""
-        block = {
-            "rows": [
-                {"cells": [{"text": "H1"}, {"text": "H2"}, {"text": "H3"}, {"text": "H4"}]},
-                {"cells": [{"text": "Item"}, {"text": "2"}, {"text": "10.00"}, {"text": "20.00"}]},
-            ]
+    The old block-of-cells table parser (_parse_table_block) was removed; line
+    items now come from the blueprint's ``SERVICES_TABLE`` — a list of dicts
+    keyed by blueprint field names — mapped through ``_BP_LINE_ITEM_MAP``.
+    """
+
+    def test_parses_service_table_rows(self):
+        """Each SERVICES_TABLE row becomes a lineItems entry with mapped keys."""
+        raw = {
+            "inference_result": {
+                "SERVICES_TABLE": [
+                    {"product description": "Item", "quantity": "2",
+                     "unit price": "10.00", "amount": "20.00"},
+                ]
+            }
         }
-        items = _parse_table_block(block)
-        assert len(items) == 1
-        assert items[0]["description"] == "Item"
+        result = _parse_bda_response(raw)
+        assert len(result["lineItems"]) == 1
+        item = result["lineItems"][0]
+        assert item["description"] == "Item"
+        assert item["quantity"] == 2.0
+        assert item["unitPrice"] == 10.0
+        assert item["amount"] == 20.0
 
-    def test_skips_rows_with_fewer_than_4_cells(self):
-        """Rows with <4 cells are skipped."""
-        block = {
-            "rows": [
-                {"cells": [{"text": "H1"}, {"text": "H2"}, {"text": "H3"}, {"text": "H4"}]},
-                {"cells": [{"text": "Only two"}, {"text": "cells"}]},
-                {"cells": [{"text": "Good"}, {"text": "1"}, {"text": "5"}, {"text": "5"}]},
-            ]
+    def test_multiple_rows_all_parsed(self):
+        """Multiple rows are all captured in order."""
+        raw = {
+            "inference_result": {
+                "SERVICES_TABLE": [
+                    {"product description": "First", "quantity": "1",
+                     "unit price": "5", "amount": "5"},
+                    {"product description": "Second", "quantity": "3",
+                     "unit price": "4", "amount": "12"},
+                ]
+            }
         }
-        items = _parse_table_block(block)
-        assert len(items) == 1
-        assert items[0]["description"] == "Good"
+        result = _parse_bda_response(raw)
+        descriptions = [i["description"] for i in result["lineItems"]]
+        assert descriptions == ["First", "Second"]
 
-    def test_empty_rows_list(self):
-        """No rows → empty list."""
-        block = {"rows": []}
-        assert _parse_table_block(block) == []
-
-    def test_only_header_row(self):
-        """Only header row → empty list."""
-        block = {
-            "rows": [
-                {"cells": [{"text": "A"}, {"text": "B"}, {"text": "C"}, {"text": "D"}]}
-            ]
+    def test_non_dict_rows_are_skipped(self):
+        """Malformed (non-dict) rows are ignored rather than crashing."""
+        raw = {
+            "inference_result": {
+                "SERVICES_TABLE": [
+                    "not a dict",
+                    {"product description": "Good", "quantity": "1",
+                     "unit price": "5", "amount": "5"},
+                ]
+            }
         }
-        assert _parse_table_block(block) == []
+        result = _parse_bda_response(raw)
+        assert len(result["lineItems"]) == 1
+        assert result["lineItems"][0]["description"] == "Good"
+
+    def test_missing_service_table_yields_empty_list(self):
+        """No SERVICES_TABLE → empty lineItems list (not an error)."""
+        raw = {"inference_result": {}}
+        result = _parse_bda_response(raw)
+        assert result["lineItems"] == []
 
 
 # ── Field coercion ────────────────────────────────────────────────────────────
@@ -584,27 +438,6 @@ class TestSafeFloat:
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
-
-
-class TestValidateBdaOutput:
-    """Tests for _validate_bda_output."""
-
-    def test_valid_output_passes(self):
-        """Well-formed BDA output does not raise."""
-        _validate_bda_output({"blocks": []})
-
-    def test_missing_blocks_logs_warning_but_does_not_raise(self):
-        """Missing 'blocks' key logs a warning but does not raise."""
-        # Should not raise
-        _validate_bda_output({"otherKey": "data"})
-
-    def test_non_dict_raises(self):
-        """Non-dict BDA output raises ExtractionError."""
-        with pytest.raises(ExtractionError) as exc_info:
-            _validate_bda_output([1, 2, 3])  # type: ignore
-
-        assert "not a JSON object" in str(exc_info.value)
-        assert exc_info.value.retryable is False
 
 
 class TestValidateExtractionResult:
@@ -696,24 +529,53 @@ class TestExtractInvoiceFullFlow:
             "invocationArn": "arn:invocation/test"
         }
 
-        # BDA poll responses
+        # STS (for _bda_profile_arn) resolves the account id.
+        mock_sts = MagicMock()
+        mock_sts.get_caller_identity.return_value = {"Account": "123456789012"}
+
+        def client_factory2(service, **kwargs):
+            if "bedrock-data-automation-runtime" in service:
+                return mock_bda_runtime
+            if service == "s3":
+                return mock_s3
+            if service == "sts":
+                return mock_sts
+            return MagicMock()
+
+        mock_boto_client.side_effect = client_factory2
+
+        # BDA poll responses: the terminal Success carries the metadata S3 URI.
+        meta_uri = "s3://test-bucket/bda-output/invoices/id-1/inv.pdf/job_metadata.json"
         mock_bda_runtime.get_data_automation_status.side_effect = [
-            {"status": "IN_PROGRESS"},
-            {"status": "SUCCESS"},
+            {"status": "InProgress"},
+            {"status": "Success", "outputConfiguration": {"s3Uri": meta_uri}},
         ]
 
-        # S3 output read
-        bda_output = _make_bda_blocks(
-            fields={
-                "Vendor Name": "Integration Test Vendor",
-                "Invoice Number": "INT-001",
-                "Total Amount": "$500.00",
-            },
-            table_rows=[["Service A", "1", "500.00", "500.00"]],
-        )
-        mock_s3.get_object.return_value = {
-            "Body": MagicMock(read=lambda: json.dumps(bda_output).encode())
+        # _read_bda_custom_output follows job_metadata.json → custom_output_path,
+        # so S3 is read twice: first the metadata, then the inference result.
+        custom_path = "s3://test-bucket/bda-output/invoices/id-1/inv.pdf/0/custom_output.json"
+        meta_doc = {
+            "output_metadata": [
+                {"segment_metadata": [{"custom_output_path": custom_path}]}
+            ]
         }
+        inference_doc = _make_bda_output(
+            fields={
+                "VENDORNAME": "Integration Test Vendor",
+                "ID": "INT-001",
+                "TOTAL": "$500.00",
+            },
+            service_table=[
+                {"product description": "Service A", "quantity": "1",
+                 "unit price": "500.00", "amount": "500.00"},
+            ],
+        )
+
+        def get_object(Bucket, Key, **kwargs):
+            body = meta_doc if Key.endswith("job_metadata.json") else inference_doc
+            return {"Body": MagicMock(read=lambda: json.dumps(body).encode())}
+
+        mock_s3.get_object.side_effect = get_object
 
         result = extract_invoice(bucket="test-bucket", s3_key="invoices/id-1/inv.pdf")
 

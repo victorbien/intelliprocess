@@ -138,6 +138,8 @@ Resources:
     Type: AWS::S3::Bucket
     DependsOn:
       - DocumentBucketPermissionToProcessor
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: "intelliprocess-ai-documents"
       PublicAccessBlockConfiguration:

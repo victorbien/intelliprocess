@@ -113,6 +113,66 @@ def process_invoice(bucket: str, s3_key: str) -> None:
         _mark_error(document_id, str(exc), s3_key=s3_key)
 
 
+def run_matching_and_decision(
+    extraction: dict[str, Any],
+    log_ctx: dict | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run PO match → GR match → three-way match → approval rules.
+
+    Pure logic with no DynamoDB/S3 side effects: given an extraction record it
+    returns ``(match_result, decision)``. Shared by the live pipeline
+    (``_run_pipeline``) and the reprocess script so both apply identical
+    matching semantics — notably the fix that a referenced-but-missing PO
+    yields ``NO_MATCH`` rather than a fuzzy substitution.
+    """
+    log_ctx = log_ctx or {}
+
+    po_number = extraction.get("poReference")
+    vendor_name = extraction.get("vendorName", "")
+    total_amount = float(extraction.get("totalAmount", 0))
+
+    line_items = extraction.get("lineItems") or []
+    invoiced_qty = sum(float(item.get("quantity", 0)) for item in line_items)
+
+    # Load admin-configurable thresholds once (falls back to defaults if unset).
+    approval_settings = get_approval_settings()
+    logger.info("Loaded approval settings", extra={**log_ctx, **approval_settings})
+
+    po_result = match_purchase_order(
+        po_number=po_number,
+        vendor_name=vendor_name,
+        invoice_amount=total_amount,
+        invoiced_quantity=invoiced_qty,
+        amount_tolerance=approval_settings["poAmountTolerance"],
+        qty_tolerance=approval_settings["grQtyTolerance"],
+    )
+
+    # Use the matched PO ID if we found one (more reliable for GR lookup)
+    gr_po_number = po_result.get("poId") or po_number
+
+    gr_result = match_goods_receipt(
+        po_number=gr_po_number,
+        invoiced_quantity=invoiced_qty,
+        invoice_amount=total_amount,
+        qty_tolerance=approval_settings["grQtyTolerance"],
+        amount_tolerance=approval_settings["poAmountTolerance"],
+    )
+
+    match_result = three_way_match(po_result=po_result, gr_result=gr_result)
+
+    decision = evaluate_approval_rules(
+        total_amount=total_amount,
+        overall_confidence=float(extraction.get("overallConfidence", 0)),
+        vendor_name=vendor_name,
+        three_way_match_status=match_result["status"],
+        discrepancies=match_result.get("discrepancies", []),
+        amount_threshold=approval_settings["amountThreshold"],
+        confidence_threshold=approval_settings["confidenceThreshold"],
+    )
+
+    return match_result, decision
+
+
 # ── Pipeline internals ────────────────────────────────────────────────────────
 
 def _run_pipeline(
@@ -163,50 +223,8 @@ def _run_pipeline(
         overallConfidence=Decimal(str(round(overall_conf, 4))),
     )
 
-    # ── 5. PO + GR matching ───────────────────────────────────────────────────
-    po_number = extraction.get("poReference")
-    vendor_name = extraction.get("vendorName", "")
-    total_amount = float(extraction.get("totalAmount", 0))
-
-    line_items = extraction.get("lineItems") or []
-    invoiced_qty = sum(float(item.get("quantity", 0)) for item in line_items)
-
-    # Load admin-configurable thresholds once (falls back to defaults if unset).
-    approval_settings = get_approval_settings()
-    logger.info("Loaded approval settings", extra={**log_ctx, **approval_settings})
-
-    po_result = match_purchase_order(
-        po_number=po_number,
-        vendor_name=vendor_name,
-        invoice_amount=total_amount,
-        invoiced_quantity=invoiced_qty,
-        amount_tolerance=approval_settings["poAmountTolerance"],
-        qty_tolerance=approval_settings["grQtyTolerance"],
-    )
-
-    # Use the matched PO ID if we found one (more reliable for GR lookup)
-    gr_po_number = po_result.get("poId") or po_number
-
-    gr_result = match_goods_receipt(
-        po_number=gr_po_number,
-        invoiced_quantity=invoiced_qty,
-        invoice_amount=total_amount,
-        qty_tolerance=approval_settings["grQtyTolerance"],
-        amount_tolerance=approval_settings["poAmountTolerance"],
-    )
-
-    match_result = three_way_match(po_result=po_result, gr_result=gr_result)
-
-    # ── 6. Apply approval rules ───────────────────────────────────────────────
-    decision = evaluate_approval_rules(
-        total_amount=total_amount,
-        overall_confidence=float(extraction.get("overallConfidence", 0)),
-        vendor_name=vendor_name,
-        three_way_match_status=match_result["status"],
-        discrepancies=match_result.get("discrepancies", []),
-        amount_threshold=approval_settings["amountThreshold"],
-        confidence_threshold=approval_settings["confidenceThreshold"],
-    )
+    # ── 5 + 6. Matching + approval decision ───────────────────────────────────
+    match_result, decision = run_matching_and_decision(extraction, log_ctx=log_ctx)
 
     # ── 7. Persist match + decision; final status update ─────────────────────
     elapsed_ms = int((time.monotonic() - start_time) * 1000)

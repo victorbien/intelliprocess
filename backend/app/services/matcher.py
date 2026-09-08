@@ -62,10 +62,14 @@ def match_purchase_order(
 
     Strategy
     --------
-    1. If ``po_number`` is present, attempt an *exact* PO number lookup first.
-    2. If exact lookup fails (or ``po_number`` is None), fall back to a
-       *fuzzy vendor-name* lookup via GSI-VendorDate and pick the PO whose
-       amount is closest to the invoice amount.
+    1. If ``po_number`` is present, attempt an *exact* PO number lookup. When
+       a PO number is supplied but no PO with that number exists, this is a
+       hard ``NO_MATCH`` — we do NOT silently substitute a different PO, since
+       that would let an invoice referencing a non-existent PO pass the
+       three-way match against an unrelated real PO.
+    2. Only when ``po_number`` is absent do we fall back to a *fuzzy
+       vendor-name* lookup via GSI-VendorDate and pick the PO whose amount is
+       closest to the invoice amount.
     3. Compare vendor name (case-insensitive substring check), amount
        (within ``amount_tolerance``) and quantity (Invoice quantity vs PO
        quantity, within ``qty_tolerance``).
@@ -91,13 +95,31 @@ def match_purchase_order(
         if po:
             logger.debug("Exact PO lookup hit", extra={**log_ctx, "found": True})
         else:
-            logger.debug("Exact PO lookup miss", extra={**log_ctx, "found": False})
+            # A PO number was extracted from the invoice but no matching PO
+            # exists. Do NOT fall back to fuzzy vendor matching here: that would
+            # match an unrelated real PO and produce a false three-way PASS for
+            # an invoice referencing a non-existent PO. Fail explicitly instead.
+            logger.info(
+                "Referenced PO not found — no match",
+                extra={**log_ctx, "found": False},
+            )
+            return {
+                "status": "NO_MATCH",
+                "poId": None,
+                "amountVariancePct": None,
+                "poAmount": None,
+                "amountInvoiced": invoice_amount,
+                "quantityVariancePct": None,
+                "poQuantity": None,
+                "invoicedQuantity": invoiced_quantity,
+                "discrepancies": [f"PO {po_number} not found"],
+            }
 
-    # ── 2. Fuzzy fallback: query by vendor name ────────────────────────────────
+    # ── 2. Fuzzy fallback: query by vendor name (only when no PO number) ───────
     if po is None:
         logger.info(
-            "Falling back to fuzzy PO search",
-            extra={**log_ctx, "reason": "no exact match"},
+            "No PO number on invoice — attempting fuzzy PO search",
+            extra={**log_ctx, "reason": "no po number"},
         )
         pos, _ = _po_db.query_by_index(
             index_name="GSI-VendorDate",

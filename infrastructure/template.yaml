@@ -52,6 +52,13 @@ Globals:
         LOG_LEVEL: "INFO"
 
 Resources:
+  DocumentBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref DocumentBucketName
+
   # ======================== DynamoDB ========================
   InvoicesTable:
     Type: AWS::DynamoDB::Table
@@ -172,7 +179,7 @@ Resources:
           RequireNumbers: true
           RequireSymbols: false
 
-  CognitoUserPoolClient:
+  UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
       ClientName: intelliprocess-web
@@ -183,25 +190,25 @@ Resources:
         - ALLOW_REFRESH_TOKEN_AUTH
       SupportedIdentityProviders: [COGNITO]
 
-  CognitoAPClerkGroup:
+  UserPoolGroupAPClerk:
     Type: AWS::Cognito::UserPoolGroup
     Properties:
       GroupName: AP_CLERK
       UserPoolId: !Ref CognitoUserPool
 
-  CognitoFinanceGroup:
+  UserPoolGroupFinanceManager:
     Type: AWS::Cognito::UserPoolGroup
     Properties:
       GroupName: FINANCE_MANAGER
       UserPoolId: !Ref CognitoUserPool
 
-  CognitoStaffGroup:
+  UserPoolGroupStaff:
     Type: AWS::Cognito::UserPoolGroup
     Properties:
       GroupName: STAFF
       UserPoolId: !Ref CognitoUserPool
 
-  CognitoAdminGroup:
+  UserPoolGroupAdmin:
     Type: AWS::Cognito::UserPoolGroup
     Properties:
       GroupName: ADMIN
@@ -306,7 +313,7 @@ Outputs:
 
   UserPoolClientId:
     Description: Cognito App Client ID
-    Value: !Ref CognitoUserPoolClient
+    Value: !Ref UserPoolClient
 
   ApiFunctionArn:
     Description: API Lambda function ARN

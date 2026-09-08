@@ -277,6 +277,49 @@ class TestProcessInvoiceHappyPath:
         assert gr_call.kwargs.get("po_number") == "PO-2024-0456"
 
 
+class TestMatchingDecision:
+    @patch("app.services.processor.get_approval_settings", return_value={
+        "amountThreshold": 30_000.00,
+        "confidenceThreshold": 0.85,
+        "poAmountTolerance": 0.05,
+        "grQtyTolerance": 0.02,
+    })
+    @patch("app.services.processor.match_goods_receipt", return_value={
+        "status": "CONFIRMED",
+        "grId": "GR-20260908-01",
+        "quantityReceived": 171.0,
+        "quantityInvoiced": 171.0,
+        "amountReceived": 28_692.50,
+        "amountInvoiced": 28_692.50,
+        "amountVariancePct": 0.0,
+        "discrepancies": [],
+    })
+    @patch("app.services.processor.match_purchase_order", return_value={
+        "status": "NO_MATCH",
+        "poId": None,
+        "discrepancies": ["PO PO-20260901-1212 not found"],
+    })
+    def test_missing_referenced_po_cannot_auto_approve(
+        self, mock_po, mock_gr, mock_settings
+    ):
+        """A missing referenced PO must escalate even when other rules pass."""
+        from app.services.processor import run_matching_and_decision
+
+        match_result, decision = run_matching_and_decision({
+            "poReference": "PO-20260901-1212",
+            "vendorName": "A Vendor",
+            "totalAmount": 28_692.50,
+            "overallConfidence": 0.90,
+            "lineItems": [{"quantity": 171}],
+        })
+
+        assert match_result["status"] == "FAIL"
+        assert decision["decision"] == "ESCALATE"
+        assert decision["escalateTo"] == "AP_CLERK"
+        assert any("PO PO-20260901-1212 not found" in detail
+                   for detail in decision["rulesResults"][0]["detail"].split(" — "))
+
+
 # ── process_invoice: escalation path ─────────────────────────────────────────
 
 class TestProcessInvoiceEscalation:

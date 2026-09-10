@@ -310,6 +310,8 @@ async def upload_purchase_order(
         "uploadedBy": user.email or user.user_id,
         "uploadedAt": now,
     }
+    if body.s3_key:
+        item["s3Key"] = body.s3_key
     if body.department:
         item["department"] = body.department
     if body.vendor_id:
@@ -451,7 +453,7 @@ def _sum_line_item_quantities(extraction: dict) -> float:
     )
 
 
-def _map_po(extraction: dict) -> PurchaseOrderExtractResponse:
+def _map_po(extraction: dict, s3_key: str | None = None) -> PurchaseOrderExtractResponse:
     total = extraction.get("totalAmount")
     total_qty = _sum_line_item_quantities(extraction)
     return PurchaseOrderExtractResponse(
@@ -460,10 +462,11 @@ def _map_po(extraction: dict) -> PurchaseOrderExtractResponse:
         totalAmount=float(total) if isinstance(total, (int, float)) and total else None,
         totalQuantity=total_qty if total_qty > 0 else None,
         overallConfidence=extraction.get("overallConfidence"),
+        s3Key=s3_key,
     )
 
 
-def _map_gr(extraction: dict) -> GoodsReceiptExtractResponse:
+def _map_gr(extraction: dict, s3_key: str | None = None) -> GoodsReceiptExtractResponse:
     total = extraction.get("totalAmount")
     total_qty = _sum_line_item_quantities(extraction)
     return GoodsReceiptExtractResponse(
@@ -472,6 +475,7 @@ def _map_gr(extraction: dict) -> GoodsReceiptExtractResponse:
         totalQuantityReceived=total_qty if total_qty > 0 else None,
         totalAmount=float(total) if isinstance(total, (int, float)) and total else None,
         overallConfidence=extraction.get("overallConfidence"),
+        s3Key=s3_key,
     )
 
 
@@ -542,7 +546,7 @@ async def extract_purchase_order(
         )
 
     _restage_upload(s3_key, S3Stage.PROCESSED)
-    return ApiResponse(data=_map_po(extraction))
+    return ApiResponse(data=_map_po(extraction, s3_key))
 
 
 @po_router.get("/extract/status")
@@ -572,7 +576,7 @@ async def po_extract_status(
 
     extraction = finalize_bda_job(invocation_arn)
     _restage_upload(s3_key, S3Stage.PROCESSED)
-    return ApiResponse(data=_map_po(extraction))
+    return ApiResponse(data=_map_po(extraction, s3_key))
 
 
 # ── POST /goods-receipts/upload ───────────────────────────────────────────────
@@ -641,6 +645,8 @@ async def upload_goods_receipt(
         "uploadedBy": user.email or user.user_id,
         "uploadedAt": now,
     }
+    if body.s3_key:
+        item["s3Key"] = body.s3_key
 
     try:
         _gr_db.put_item(item)
@@ -764,7 +770,7 @@ async def extract_goods_receipt(
         )
 
     _restage_upload(s3_key, S3Stage.PROCESSED)
-    return ApiResponse(data=_map_gr(extraction))
+    return ApiResponse(data=_map_gr(extraction, s3_key))
 
 
 @gr_router.get("/extract/status")
@@ -794,7 +800,7 @@ async def gr_extract_status(
 
     extraction = finalize_bda_job(invocation_arn)
     _restage_upload(s3_key, S3Stage.PROCESSED)
-    return ApiResponse(data=_map_gr(extraction))
+    return ApiResponse(data=_map_gr(extraction, s3_key))
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -821,6 +827,13 @@ def _to_float(value: object) -> float | None:
 def _map_po_row(item: dict) -> PurchaseOrderListItem:
     """Map a raw PO DynamoDB item to a list row (Decimals → float)."""
     po_number = str(item.get("poNumber", ""))
+    document_url = None
+    s3_key = item.get("s3Key")
+    if s3_key:
+        try:
+            document_url = _s3.generate_presigned_get(str(s3_key))
+        except Exception:  # noqa: BLE001 — best effort; missing key or S3 issues should not block view
+            document_url = None
     return PurchaseOrderListItem(
         poNumber=po_number,
         fileName=item.get("fileName") or po_number,
@@ -832,6 +845,7 @@ def _map_po_row(item: dict) -> PurchaseOrderListItem:
         createdDate=item.get("createdDate"),
         uploadedBy=item.get("uploadedBy"),
         uploadedAt=item.get("uploadedAt"),
+        documentUrl=document_url,
     )
 
 
@@ -848,6 +862,13 @@ def _map_po_detail(item: dict) -> PurchaseOrderDetailResponse:
 def _map_gr_row(item: dict) -> GoodsReceiptListItem:
     """Map a raw GR DynamoDB item to a list row (Decimals → float)."""
     gr_id = str(item.get("grId", ""))
+    document_url = None
+    s3_key = item.get("s3Key")
+    if s3_key:
+        try:
+            document_url = _s3.generate_presigned_get(str(s3_key))
+        except Exception:  # noqa: BLE001 — best effort; missing key or S3 issues should not block view
+            document_url = None
     return GoodsReceiptListItem(
         grId=gr_id,
         poNumber=item.get("poNumber"),
@@ -859,6 +880,7 @@ def _map_gr_row(item: dict) -> GoodsReceiptListItem:
         receivedDate=item.get("receivedDate"),
         uploadedBy=item.get("uploadedBy"),
         uploadedAt=item.get("uploadedAt"),
+        documentUrl=document_url,
     )
 
 

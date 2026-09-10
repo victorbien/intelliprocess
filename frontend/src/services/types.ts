@@ -231,7 +231,7 @@ export interface PurchaseOrderListItem {
 
 /** Full Purchase Order detail for GET /purchase-orders/{poNumber}. */
 export interface PurchaseOrderDetail extends PurchaseOrderListItem {
-  documentUrl: any;
+  documentUrl?: string | null;
   department?: string | null;
   vendorId?: string | null;
 }
@@ -248,6 +248,7 @@ export interface GoodsReceiptListItem {
   receivedDate?: string | null;
   uploadedBy?: string | null;
   uploadedAt?: string | null;
+  documentUrl?: string | null;
 }
 
 /** Full Goods Receipt detail for GET /goods-receipts/{grId}. */
@@ -261,6 +262,7 @@ export interface PurchaseOrderExtract {
   totalAmount?: number | null;
   totalQuantity?: number | null;
   overallConfidence?: number | null;
+  s3Key?: string | null;
 }
 
 /** Candidate GR fields extracted from an uploaded document (POST /goods-receipts/extract). */
@@ -271,6 +273,7 @@ export interface GoodsReceiptExtract {
   totalQuantityReceived?: number | null;
   totalAmount?: number | null;
   overallConfidence?: number | null;
+  s3Key?: string | null;
 }
 
 /** 202 pending response for the sync-then-async extract flow. */

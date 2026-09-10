@@ -10,6 +10,7 @@
  * normalised shape so PO# / GR# render correctly for each.
  */
 
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import Spinner from "@/components/common/Spinner";
@@ -38,6 +39,7 @@ interface TransactionTableProps {
   error: string | null;
   emptyMessage: string;
   onRetry: () => void;
+  headerAction?: ReactNode;
 }
 
 function formatDateTime(value?: string | null): string {
@@ -70,13 +72,16 @@ export default function TransactionTable({
   error,
   emptyMessage,
   onRetry,
+  headerAction,
 }: TransactionTableProps) {
   return (
     <div className="rounded-lg border border-slate-200 bg-white">
-      <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+      <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
         <h2 className="text-sm font-semibold text-slate-700">{title}</h2>
         <span className="text-xs text-slate-400">{rows.length} record{rows.length === 1 ? "" : "s"}</span>
       </div>
+
+      {headerAction && <div className="border-b border-slate-200 bg-slate-50/60 p-4">{headerAction}</div>}
 
       {loading ? (
         <div className="p-6">

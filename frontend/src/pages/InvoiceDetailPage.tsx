@@ -134,11 +134,7 @@ export default function InvoiceDetailPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Section title="Extracted data">
-          <ExtractionView
-            extraction={invoice.extraction}
-            confidence={invoice.confidence}
-            overallConfidence={invoice.overallConfidence}
-          />
+          <ExtractionView extraction={invoice.extraction} />
         </Section>
 
         <div className="space-y-4">

@@ -68,8 +68,6 @@ export default function GoodsReceiptsPage() {
         </p>
       </div>
 
-      {isAdmin && <GoodsReceiptUpload onUploaded={() => void load()} />}
-
       <TransactionTable
         title="Goods Receipts"
         rows={items.map(toRow)}
@@ -77,6 +75,7 @@ export default function GoodsReceiptsPage() {
         error={error}
         emptyMessage="No goods receipts found."
         onRetry={() => void load()}
+        headerAction={isAdmin ? <GoodsReceiptUpload onUploaded={() => void load()} /> : undefined}
       />
     </div>
   );

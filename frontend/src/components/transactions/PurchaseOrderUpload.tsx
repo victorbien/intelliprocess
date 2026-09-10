@@ -25,6 +25,7 @@ export default function PurchaseOrderUpload({ onUploaded }: { onUploaded?: () =>
   const [msg, setMsg] = useState<Feedback>(null);
   const [extracting, setExtracting] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
+  const [s3Key, setS3Key] = useState<string | null>(null);
   const locked = extracting || busy;
 
   const extract = async (file: File) => {
@@ -34,6 +35,7 @@ export default function PurchaseOrderUpload({ onUploaded }: { onUploaded?: () =>
     setMsg(null);
     try {
       const res = await adminApi.extractPurchaseOrder(file);
+      setS3Key(res.s3Key ?? null);
       setPo({
         poNumber: res.poNumber ?? "",
         vendorName: res.vendorName ?? "",
@@ -47,7 +49,7 @@ export default function PurchaseOrderUpload({ onUploaded }: { onUploaded?: () =>
       if (filled === 0) {
         setMsg({ tone: "err", text: "No fields could be read from that document. Enter the details manually." });
       } else {
-        setMsg({ tone: "ok", text: `Auto-filled ${filled} of 4 fields${conf}. Review and edit before saving.` });
+        setMsg({ tone: "ok", text: `Auto-filled ${filled} of 4 fields. Review and edit before saving.` });
       }
     } catch (err) {
       setMsg({ tone: "err", text: err instanceof ApiError ? err.message : "Extraction failed." });
@@ -79,10 +81,12 @@ export default function PurchaseOrderUpload({ onUploaded }: { onUploaded?: () =>
         totalAmount: amount,
         totalQuantity: quantity,
         fileName: fileName ?? undefined,
+        s3Key: s3Key ?? undefined,
       });
       setMsg({ tone: "ok", text: `Purchase order ${po.poNumber.trim()} stored.` });
       setPo({ poNumber: "", vendorName: "", totalAmount: "", totalQuantity: "" });
       setFileName(null);
+      setS3Key(null);
       onUploaded?.();
     } catch (err) {
       setMsg({ tone: "err", text: err instanceof ApiError ? err.message : "PO upload failed." });

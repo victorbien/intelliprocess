@@ -107,6 +107,18 @@ export default function GoodsReceiptDetailPage() {
           <Field label="Date & Time Uploaded" value={formatDateTime(gr.uploadedAt)} />
         </dl>
       </section>
+
+      {gr.documentUrl && (
+        <a
+          href={gr.documentUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-indigo-600 transition hover:bg-slate-50"
+        >
+          View original document
+          <span aria-hidden>↗</span>
+        </a>
+      )}
     </div>
   );
 }

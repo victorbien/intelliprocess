@@ -235,6 +235,22 @@ class TestPurchaseOrderUpload:
         )
         assert resp.status_code == 403
 
+    @patch("app.routers.dashboard._po_db")
+    @patch("app.routers.dashboard._s3.generate_presigned_get")
+    async def test_po_detail_includes_document_url(self, mock_presign, mock_po):
+        mock_po.get_item.return_value = {
+            "poNumber": "PO-2024-9999",
+            "fileName": "PO-2024-9999.pdf",
+            "s3Key": "purchase-orders/processed/po-2024-9999/PO-2024-9999.pdf",
+        }
+        mock_presign.return_value = "https://example.test/po.pdf"
+        app.dependency_overrides[get_current_user] = lambda: _admin()
+
+        resp = await _get("/purchase-orders/PO-2024-9999")
+
+        assert resp.status_code == 200
+        assert resp.json()["data"]["documentUrl"] == "https://example.test/po.pdf"
+
 
 @pytest.mark.asyncio
 class TestGoodsReceiptUpload:
@@ -285,6 +301,22 @@ class TestGoodsReceiptUpload:
             {"grId": "GR-1", "poNumber": "PO-1", "totalQuantityReceived": 5},
         )
         assert resp.status_code == 403
+
+    @patch("app.routers.dashboard._gr_db")
+    @patch("app.routers.dashboard._s3.generate_presigned_get")
+    async def test_gr_detail_includes_document_url(self, mock_presign, mock_gr):
+        mock_gr.get_item.return_value = {
+            "grId": "GR-9999",
+            "fileName": "GR-9999.pdf",
+            "s3Key": "goods-receipts/processed/gr-9999/GR-9999.pdf",
+        }
+        mock_presign.return_value = "https://example.test/gr.pdf"
+        app.dependency_overrides[get_current_user] = lambda: _admin()
+
+        resp = await _get("/goods-receipts/GR-9999")
+
+        assert resp.status_code == 200
+        assert resp.json()["data"]["documentUrl"] == "https://example.test/gr.pdf"
 
 
 @pytest.mark.asyncio

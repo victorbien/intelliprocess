@@ -271,6 +271,7 @@ export const adminApi = {
     currency?: string;
     department?: string;
     fileName?: string;
+    s3Key?: string;
   }) => post<PurchaseOrderUploadResponse>("/purchase-orders/upload", body),
   uploadGoodsReceipt: (body: {
     grId: string;
@@ -279,6 +280,7 @@ export const adminApi = {
     totalAmount: number;
     status?: string;
     fileName?: string;
+    s3Key?: string;
   }) => post<GoodsReceiptUploadResponse>("/goods-receipts/upload", body),
   getSettings: () => get<ApprovalSettings>("/admin/settings"),
   updateSettings: (body: ApprovalSettings) =>

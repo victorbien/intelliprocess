@@ -25,6 +25,7 @@ export default function GoodsReceiptUpload({ onUploaded }: { onUploaded?: () => 
   const [msg, setMsg] = useState<Feedback>(null);
   const [extracting, setExtracting] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
+  const [s3Key, setS3Key] = useState<string | null>(null);
   const locked = extracting || busy;
 
   const extract = async (file: File) => {
@@ -34,6 +35,7 @@ export default function GoodsReceiptUpload({ onUploaded }: { onUploaded?: () => 
     setMsg(null);
     try {
       const res = await adminApi.extractGoodsReceipt(file);
+      setS3Key(res.s3Key ?? null);
       setGr({
         grId: res.grId ?? "",
         poNumber: res.poNumber ?? "",
@@ -47,7 +49,7 @@ export default function GoodsReceiptUpload({ onUploaded }: { onUploaded?: () => 
       if (filled === 0) {
         setMsg({ tone: "err", text: "No fields could be read from that document. Enter the details manually." });
       } else {
-        setMsg({ tone: "ok", text: `Auto-filled ${filled} of 4 fields${conf}. Review and edit before saving.` });
+        setMsg({ tone: "ok", text: `Auto-filled ${filled} of 4 fields. Review and edit before saving.` });
       }
     } catch (err) {
       setMsg({ tone: "err", text: err instanceof ApiError ? err.message : "Extraction failed." });
@@ -79,10 +81,12 @@ export default function GoodsReceiptUpload({ onUploaded }: { onUploaded?: () => 
         totalQuantityReceived: qty,
         totalAmount: amount,
         fileName: fileName ?? undefined,
+        s3Key: s3Key ?? undefined,
       });
       setMsg({ tone: "ok", text: `Goods receipt ${gr.grId.trim()} linked to ${gr.poNumber.trim()}.` });
       setGr({ grId: "", poNumber: "", totalQuantityReceived: "", totalAmount: "" });
       setFileName(null);
+      setS3Key(null);
       onUploaded?.();
     } catch (err) {
       setMsg({ tone: "err", text: err instanceof ApiError ? err.message : "GR upload failed." });

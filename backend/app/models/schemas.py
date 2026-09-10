@@ -463,6 +463,7 @@ class PurchaseOrderUploadRequest(BaseModel):
     department: str | None = Field(None, max_length=128)
     vendor_id: str | None = Field(None, alias="vendorId", max_length=64)
     file_name: str | None = Field(None, alias="fileName", max_length=255)
+    s3_key: str | None = Field(None, alias="s3Key", max_length=1024)
 
     @field_validator("po_number")
     @classmethod
@@ -515,6 +516,7 @@ class GoodsReceiptUploadRequest(BaseModel):
     received_date: str | None = Field(None, alias="receivedDate")
     status: str = Field("COMPLETE", max_length=32)
     file_name: str | None = Field(None, alias="fileName", max_length=255)
+    s3_key: str | None = Field(None, alias="s3Key", max_length=1024)
 
     @field_validator("gr_id")
     @classmethod
@@ -569,6 +571,7 @@ class PurchaseOrderListItem(BaseModel):
     created_date: str | None = Field(None, alias="createdDate")
     uploaded_by: str | None = Field(None, alias="uploadedBy")
     uploaded_at: str | None = Field(None, alias="uploadedAt")
+    document_url: str | None = Field(None, alias="documentUrl")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
 
@@ -599,6 +602,7 @@ class GoodsReceiptListItem(BaseModel):
     received_date: str | None = Field(None, alias="receivedDate")
     uploaded_by: str | None = Field(None, alias="uploadedBy")
     uploaded_at: str | None = Field(None, alias="uploadedAt")
+    document_url: str | None = Field(None, alias="documentUrl")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
 
@@ -660,6 +664,7 @@ class PurchaseOrderExtractResponse(BaseModel):
     total_amount: float | None = Field(None, alias="totalAmount")
     total_quantity: float | None = Field(None, alias="totalQuantity")
     overall_confidence: float | None = Field(None, alias="overallConfidence")
+    s3_key: str | None = Field(None, alias="s3Key")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
 
@@ -678,5 +683,6 @@ class GoodsReceiptExtractResponse(BaseModel):
     total_quantity_received: float | None = Field(None, alias="totalQuantityReceived")
     total_amount: float | None = Field(None, alias="totalAmount")
     overall_confidence: float | None = Field(None, alias="overallConfidence")
+    s3_key: str | None = Field(None, alias="s3Key")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}

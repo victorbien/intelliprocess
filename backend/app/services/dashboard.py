@@ -169,7 +169,7 @@ def _action_label(item: dict[str, Any], decision: dict[str, Any]) -> str:
 
     if status == InvoiceStatus.APPROVED.value:
         approver = str(decision.get("approver", "")).upper()
-        return "Auto-approved" if approver == _AUTO_APPROVED_APPROVER else "Manually approved"
+        return "Approved" if approver == _AUTO_APPROVED_APPROVER else "Manually approved"
     if status == InvoiceStatus.ESCALATED.value:
         reason = decision.get("reason")
         return f"Escalated - {reason}" if reason else "Escalated"

@@ -68,8 +68,6 @@ export default function PurchaseOrdersPage() {
         </p>
       </div>
 
-      {isAdmin && <PurchaseOrderUpload onUploaded={() => void load()} />}
-
       <TransactionTable
         title="Purchase Orders"
         rows={items.map(toRow)}
@@ -77,6 +75,7 @@ export default function PurchaseOrdersPage() {
         error={error}
         emptyMessage="No purchase orders found."
         onRetry={() => void load()}
+        headerAction={isAdmin ? <PurchaseOrderUpload onUploaded={() => void load()} /> : undefined}
       />
     </div>
   );

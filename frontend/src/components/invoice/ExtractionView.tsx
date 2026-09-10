@@ -1,5 +1,5 @@
 /**
- * Renders extracted invoice fields with per-field confidence (AC-3.1.x).
+ * Renders extracted invoice fields without confidence badges.
  *
  * The extraction payload is loosely typed (backend returns a free-form dict),
  * so values are rendered defensively. Monetary fields are formatted as
@@ -8,8 +8,6 @@
 
 interface ExtractionViewProps {
   extraction?: Record<string, unknown> | null;
-  confidence?: Record<string, number> | null;
-  overallConfidence?: number | null;
 }
 
 // Fields rendered as labelled key/value pairs, in display order.
@@ -61,50 +59,24 @@ function formatQty(value: unknown): string {
   return new Intl.NumberFormat("en-US").format(n);
 }
 
-function ConfidenceChip({ score }: { score?: number }) {
-  if (score == null) return null;
-  const pct = Math.round(score * 100);
-  const tone =
-    score >= 0.9
-      ? "bg-green-100 text-green-700"
-      : score >= 0.75
-        ? "bg-amber-100 text-amber-800"
-        : "bg-red-100 text-red-700";
-  return (
-    <span
-      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${tone}`}
-      title={`Extraction confidence: ${pct}%`}
-    >
-      {pct}%
-    </span>
-  );
-}
-
-/** A stacked label-over-value field so long values + chips never collide. */
+/** A stacked label-over-value field. */
 function Field({
   label,
   value,
-  score,
 }: {
   label: string;
   value: string;
-  score?: number;
 }) {
   return (
     <div className="py-1.5">
       <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">{label}</dt>
-      <dd className="mt-0.5 flex items-center gap-2">
-        <span className="text-sm font-medium text-slate-800">{value}</span>
-        <ConfidenceChip score={score} />
-      </dd>
+      <dd className="mt-0.5 text-sm font-medium text-slate-800">{value}</dd>
     </div>
   );
 }
 
 export default function ExtractionView({
   extraction,
-  confidence,
-  overallConfidence,
 }: ExtractionViewProps) {
   if (!extraction) {
     return (
@@ -123,15 +95,6 @@ export default function ExtractionView({
 
   return (
     <div className="space-y-5">
-      {overallConfidence != null && (
-        <div className="flex items-center gap-2 rounded-md bg-slate-50 px-3 py-2">
-          <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            Overall confidence
-          </span>
-          <ConfidenceChip score={overallConfidence} />
-        </div>
-      )}
-
       {/* Key/value details */}
       <dl className="grid grid-cols-1 gap-x-8 sm:grid-cols-2">
         {textFields.map((f) => (
@@ -139,7 +102,6 @@ export default function ExtractionView({
             key={f.key}
             label={f.label}
             value={f.type === "date" ? formatDate(extraction[f.key]) : formatText(extraction[f.key])}
-            score={confidence?.[f.key]}
           />
         ))}
       </dl>
@@ -157,17 +119,14 @@ export default function ExtractionView({
                 >
                   {f.label}
                 </dt>
-                <dd className="flex items-center gap-2">
-                  <span
-                    className={`tabular-nums ${
-                      f.emphasize
-                        ? "text-base font-semibold text-slate-900"
-                        : "text-sm font-medium text-slate-700"
-                    }`}
-                  >
-                    {formatMoney(extraction[f.key])}
-                  </span>
-                  <ConfidenceChip score={confidence?.[f.key]} />
+                <dd
+                  className={`tabular-nums ${
+                    f.emphasize
+                      ? "text-base font-semibold text-slate-900"
+                      : "text-sm font-medium text-slate-700"
+                  }`}
+                >
+                  {formatMoney(extraction[f.key])}
                 </dd>
               </div>
             ))}

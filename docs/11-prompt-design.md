@@ -229,9 +229,19 @@ Answer the current question, using the conversation context to resolve any prono
 
 ## 4. BDA Extraction Prompt (Bedrock Data Automation)
 
-### 4.1 Custom Blueprint Configuration
+### 4.1 Blueprint Configuration
 
-BDA uses a blueprint to define what fields to extract from invoices:
+> **Implementation note (current):** The system now uses the **AWS-managed
+> public invoice blueprint** (`bedrock-data-automation-public-invoice`) with a
+> data-automation **profile** ARN (`apac.data-automation-v1`), not a custom
+> blueprint or a custom BDA project. No blueprint/project provisioning is
+> required. The field list below is retained as a reference for the invoice
+> fields the pipeline consumes; the public blueprint returns an equivalent set
+> (note: `dueDate` and `paymentTerms` are not provided by the public blueprint
+> and come back as `None`). See `17-bda-extraction-handoff.md` for the exact
+> ARNs, request shape, and field mapping.
+
+For reference, the invoice fields the pipeline extracts:
 
 ```json
 {
@@ -315,32 +325,38 @@ BDA uses a blueprint to define what fields to extract from invoices:
 
 ### 4.2 BDA Invocation
 
+The current invocation uses the public invoice blueprint plus a
+`dataAutomationProfileArn` (required by the current `InvokeDataAutomationAsync`
+API), and polls with `get_data_automation_status`:
+
 ```python
 def extract_invoice_with_bda(bucket: str, s3_key: str) -> dict:
-    """Extract invoice fields using Bedrock Data Automation."""
-    
-    client = boto3.client('bedrock-data-automation-runtime')
-    
+    """Extract invoice fields using Bedrock Data Automation (public blueprint)."""
+
+    client = boto3.client("bedrock-data-automation-runtime")
+
     response = client.invoke_data_automation_async(
         inputConfiguration={
             "s3Uri": f"s3://{bucket}/{s3_key}"
         },
-        blueprintArn=BDA_BLUEPRINT_ARN,
-        dataAutomationConfiguration={
-            "dataAutomationArn": BDA_PROJECT_ARN,
-            "stage": "LIVE"
-        },
         outputConfiguration={
             "s3Uri": f"s3://{bucket}/bda-output/{s3_key}"
-        }
+        },
+        # AWS-managed public invoice blueprint, stage LIVE
+        blueprints=[{"blueprintArn": PUBLIC_INVOICE_BLUEPRINT_ARN, "stage": "LIVE"}],
+        # Required by the current BDA API; resolved at runtime via STS
+        dataAutomationProfileArn=DATA_AUTOMATION_PROFILE_ARN,
     )
-    
-    # Poll for completion or use event-driven approach
+
     invocation_arn = response["invocationArn"]
+    # Poll get_data_automation_status until Success/ServiceError/etc.
     result = wait_for_completion(invocation_arn)
-    
+
     return parse_bda_response(result)
 ```
+
+> The earlier design used `blueprintArn` + `dataAutomationConfiguration.dataAutomationArn`
+> (a custom project). That path is superseded; see the handoff doc for details.
 
 ---
 

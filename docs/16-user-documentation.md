@@ -95,20 +95,22 @@ After upload, your invoice progresses through these stages:
 
 Invoices are automatically approved when ALL of these conditions are met:
 - Three-way match passes (Invoice ↔ PO ↔ Goods Receipt align)
-- Invoice amount is $10,000 or less
-- All extraction confidence scores are 85% or higher (overall average)
-- Vendor is in the approved vendor list
+- Invoice amount is at or below the amount threshold (default $10,000)
+- Overall extraction confidence is at or above the confidence threshold (default 85%)
 
 If any condition fails, the invoice is escalated for manual review.
+
+> The amount and confidence thresholds (and the PO/GR match tolerances) are
+> configurable by an administrator on the **Approval Settings** screen — see
+> section 5.4. Vendor membership is **not** an auto-approval condition.
 
 ### 2.5 Escalation Reasons
 
 | Reason | Escalated To | What To Do |
 |--------|-------------|-----------|
-| Amount exceeds $10,000 | Finance Manager | Manager reviews and approves/rejects |
+| Amount exceeds the amount threshold (default $10,000) | Finance Manager | Manager reviews and approves/rejects |
 | Three-way match failed | AP Clerk | Verify PO/GR data, resolve discrepancy |
 | Low confidence extraction | AP Clerk | Check extracted data against original |
-| Vendor not in approved list | AP Clerk | Verify vendor, request addition to list |
 
 ### 2.6 Manual Approval (Finance Manager)
 
@@ -239,6 +241,46 @@ For demo purposes:
 User management is handled through the AWS Cognito console:
 - Contact your system administrator to create new users
 - Users are assigned to groups: AP_CLERK, FINANCE_MANAGER, STAFF, or ADMIN
+
+### 5.4 Approval Settings
+
+**Who can do this:** Administrator
+
+The auto-approval thresholds and three-way match tolerances used by the AP
+Invoice Agent are configurable, so you can tune approval behaviour without a
+code change.
+
+1. Navigate to **Admin > Settings**.
+2. Adjust any of the following and click **Save**:
+
+| Setting | Meaning | Default |
+|---------|---------|---------|
+| Amount threshold | Invoices at or below this amount can auto-approve | $10,000 |
+| Confidence threshold | Minimum overall extraction confidence to auto-approve | 0.85 (85%) |
+| PO amount tolerance | Allowed margin when matching invoice amount to the PO (0 = exact) | 0.05 (5%) |
+| GR quantity tolerance | Allowed margin when matching quantities to the Goods Receipt (0 = exact) | 0.02 (2%) |
+
+New settings apply to invoices processed after they are saved. Existing
+decisions are not re-evaluated.
+
+### 5.5 Adding Purchase Orders and Goods Receipts
+
+**Who can do this:** Administrator
+
+Purchase Orders and Goods Receipts are the reference records the AP Invoice
+Agent matches invoices against. Besides loading sample data (section 5.2), you
+can add them from documents:
+
+1. Navigate to **Admin > Purchase Orders** (or **Goods Receipts**).
+2. Upload a PO or GR document (PDF, PNG, or JPEG).
+3. The system extracts the fields for you to review. Extraction usually
+   completes within a few seconds; for larger documents it continues in the
+   background and the screen updates when it is ready.
+4. While an upload and extraction is in progress, the upload controls are
+   disabled so a second file cannot be submitted until the current one
+   finishes.
+5. Review the extracted fields, correct anything if needed, and save the
+   record.
 
 ---
 

@@ -10,15 +10,13 @@ import pytest
 
 from app.services.rules import (
     AMOUNT_THRESHOLD,
-    APPROVED_VENDORS,
     CONFIDENCE_THRESHOLD,
     evaluate_approval_rules,
 )
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
-GOOD_VENDOR = next(iter(APPROVED_VENDORS))   # first vendor in approved list
-BAD_VENDOR  = "Unknown Rogue Supplier Ltd."
+GOOD_VENDOR = "Any Vendor Pty Ltd."   # vendor no longer gates approval
 
 GOOD_ARGS = dict(
     total_amount        = 500.00,
@@ -40,9 +38,9 @@ class TestAllRulesPass:
         result = evaluate_approval_rules(**GOOD_ARGS)
         assert result["escalateTo"] is None
 
-    def test_all_four_rules_evaluated(self):
+    def test_all_rules_evaluated(self):
         result = evaluate_approval_rules(**GOOD_ARGS)
-        assert len(result["rulesResults"]) == 4
+        assert len(result["rulesResults"]) == 3
 
     def test_all_rules_passed(self):
         result = evaluate_approval_rules(**GOOD_ARGS)
@@ -171,30 +169,18 @@ class TestConfidenceThreshold:
         assert not rule["passed"]
 
 
-# ── RULE-004: Approved vendor ──────────────────────────────────────────────────
+# ── Approved vendor rule removed ───────────────────────────────────────────────
 
-class TestApprovedVendor:
-    def test_unknown_vendor_escalates(self):
-        result = evaluate_approval_rules(**{**GOOD_ARGS, "vendor_name": BAD_VENDOR})
-        assert result["decision"] == "ESCALATE"
+class TestVendorNoLongerGates:
+    def test_any_vendor_can_approve(self):
+        """The approved-vendor list check was removed; vendor never gates approval."""
+        result = evaluate_approval_rules(**{**GOOD_ARGS, "vendor_name": "Totally Unknown Supplier Ltd."})
+        assert result["decision"] == "APPROVE"
 
-    def test_unknown_vendor_routes_to_ap_clerk(self):
-        result = evaluate_approval_rules(**{**GOOD_ARGS, "vendor_name": BAD_VENDOR})
-        assert result["escalateTo"] == "AP_CLERK"
-
-    def test_reason_mentions_vendor_name(self):
-        result = evaluate_approval_rules(**{**GOOD_ARGS, "vendor_name": BAD_VENDOR})
-        assert BAD_VENDOR in result["reason"]
-
-    def test_all_approved_vendors_pass(self):
-        for vendor in APPROVED_VENDORS:
-            result = evaluate_approval_rules(**{**GOOD_ARGS, "vendor_name": vendor})
-            assert result["decision"] == "APPROVE", f"Vendor '{vendor}' should pass"
-
-    def test_rule004_is_marked_failed(self):
-        result = evaluate_approval_rules(**{**GOOD_ARGS, "vendor_name": BAD_VENDOR})
-        rule = next(r for r in result["rulesResults"] if r["ruleId"] == "RULE-004")
-        assert not rule["passed"]
+    def test_no_rule004_in_results(self):
+        result = evaluate_approval_rules(**GOOD_ARGS)
+        ids = {r["ruleId"] for r in result["rulesResults"]}
+        assert "RULE-004" not in ids
 
 
 # ── Rules result structure ─────────────────────────────────────────────────────
@@ -203,7 +189,7 @@ class TestRulesResultStructure:
     def test_all_rule_ids_present(self):
         result = evaluate_approval_rules(**GOOD_ARGS)
         ids = {r["ruleId"] for r in result["rulesResults"]}
-        assert ids == {"RULE-001", "RULE-002", "RULE-003", "RULE-004"}
+        assert ids == {"RULE-001", "RULE-002", "RULE-003"}
 
     def test_each_rule_has_required_keys(self):
         result = evaluate_approval_rules(**GOOD_ARGS)

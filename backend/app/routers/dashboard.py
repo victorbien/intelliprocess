@@ -19,17 +19,36 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated
 
+import base64
+import json
+
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.middleware import AppError, CurrentUser, require_role
-from app.models.enums import UserRole
+from app.models.enums import (
+    DocumentType,
+    INVOICE_CONTENT_TYPES,
+    MAX_FILE_SIZE_BYTES,
+    S3Stage,
+    UserRole,
+)
 from app.models.schemas import (
     ApiResponse,
+    ApprovalSettings,
     DashboardStatsResponse,
+    ExtractPending,
+    GoodsReceiptDetailResponse,
+    GoodsReceiptExtractResponse,
+    GoodsReceiptListItem,
     GoodsReceiptUploadRequest,
     GoodsReceiptUploadResponse,
+    PaginatedResponse,
+    PurchaseOrderDetailResponse,
+    PurchaseOrderExtractResponse,
+    PurchaseOrderListItem,
     PurchaseOrderUploadRequest,
     PurchaseOrderUploadResponse,
     SeedDataRequest,
@@ -37,6 +56,20 @@ from app.models.schemas import (
 )
 from app.services.dashboard import compute_stats, default_seed_data
 from app.services.dynamo import DynamoClient
+from app.services.extraction import (
+    ExtractionError,
+    ExtractionTimeout,
+    extract_from_bytes,
+    finalize_bda_job,
+    poll_bda_status,
+    start_bda_job,
+)
+from app.services.s3 import S3Client, restage_key
+from app.services.settings_store import get_approval_settings, put_approval_settings
+
+# Synchronous wait budget before falling back to async polling. Kept below the
+# API Gateway 29s integration ceiling with margin for upload + response.
+_SYNC_EXTRACT_TIMEOUT_S = 18.0
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +82,15 @@ gr_router = APIRouter()
 _invoice_db = DynamoClient(settings.INVOICE_TABLE)
 _po_db = DynamoClient(settings.PO_TABLE)
 _gr_db = DynamoClient(settings.GR_TABLE)
+_s3 = S3Client()
 
 # Attributes needed to compute dashboard statistics (keeps the scan lean).
+# ``extraction`` and ``matchResult`` are nested maps projected by their
+# top-level attribute name so compute_stats can aggregate by supplier,
+# amount, and three-way match outcome.
 _STATS_PROJECTION = (
     "documentId, fileName, #s, uploadedAt, updatedAt, "
-    "approvalDecision, processingDurationMs"
+    "approvalDecision, processingDurationMs, extraction, matchResult"
 )
 _STATS_ATTR_NAMES = {"#s": "status"}
 
@@ -125,9 +162,13 @@ async def seed_data(
     purchase_orders, goods_receipts = default_seed_data()
 
     try:
-        po_count = _write_records(_po_db, purchase_orders, numeric_fields=("totalAmount",))
+        po_count = _write_records(
+            _po_db, purchase_orders, numeric_fields=("totalAmount", "totalQuantity")
+        )
         gr_count = _write_records(
-            _gr_db, goods_receipts, numeric_fields=("totalQuantityReceived",)
+            _gr_db,
+            goods_receipts,
+            numeric_fields=("totalQuantityReceived", "totalAmount"),
         )
     except (ClientError, BotoCoreError) as exc:
         logger.error("Seed data write failed", extra={"error": str(exc)})
@@ -150,6 +191,83 @@ async def seed_data(
     )
 
 
+# ── GET /admin/settings ───────────────────────────────────────────────────────
+
+
+@admin_router.get(
+    "/settings",
+    response_model=ApiResponse[ApprovalSettings],
+)
+async def get_settings(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+):
+    """Return the current admin-configurable approval/matching thresholds.
+
+    Admin-only. Falls back to built-in defaults when none have been saved.
+    """
+    logger.info("Approval settings requested", extra={"userId": user.user_id})
+
+    try:
+        values = get_approval_settings()
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Failed to read approval settings", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while retrieving settings. Please try again.",
+            status_code=500,
+        )
+
+    return ApiResponse(data=ApprovalSettings(**values))
+
+
+# ── PUT /admin/settings ───────────────────────────────────────────────────────
+
+
+@admin_router.put(
+    "/settings",
+    response_model=ApiResponse[ApprovalSettings],
+)
+async def update_settings(
+    body: ApprovalSettings,
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+):
+    """Update the admin-configurable approval/matching thresholds (ADMIN only).
+
+    Validated ranges (enforced by the schema):
+      - amountThreshold      >= 0
+      - confidenceThreshold  0.0-1.0
+      - poAmountTolerance    0.0-1.0  (0 = exact match)
+      - grQtyTolerance       0.0-1.0  (0 = exact match)
+    """
+    logger.info(
+        "Approval settings update",
+        extra={
+            "userId": user.user_id,
+            "amountThreshold": body.amount_threshold,
+            "confidenceThreshold": body.confidence_threshold,
+            "poAmountTolerance": body.po_amount_tolerance,
+            "grQtyTolerance": body.gr_qty_tolerance,
+        },
+    )
+
+    try:
+        stored = put_approval_settings(
+            {
+                "amountThreshold":     body.amount_threshold,
+                "confidenceThreshold": body.confidence_threshold,
+                "poAmountTolerance":   body.po_amount_tolerance,
+                "grQtyTolerance":      body.gr_qty_tolerance,
+            }
+        )
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Failed to write approval settings", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while saving settings. Please try again.",
+            status_code=500,
+        )
+
+    return ApiResponse(data=ApprovalSettings(**stored))
+
+
 # ── POST /purchase-orders/upload ──────────────────────────────────────────────
 
 
@@ -168,6 +286,7 @@ async def upload_purchase_order(
     three-way matching against future invoices.
     """
     created_date = body.created_date or datetime.now(timezone.utc).date().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     logger.info(
         "Purchase order upload",
@@ -182,10 +301,17 @@ async def upload_purchase_order(
         "poNumber": body.po_number,
         "vendorName": body.vendor_name,
         "totalAmount": Decimal(str(body.total_amount)),
+        "totalQuantity": Decimal(str(body.total_quantity)),
         "currency": body.currency,
         "createdDate": created_date,
         "status": "OPEN",
+        # Provenance for the list/detail views (uploaded by / when / file name).
+        "fileName": body.file_name or body.po_number,
+        "uploadedBy": user.email or user.user_id,
+        "uploadedAt": now,
     }
+    if body.s3_key:
+        item["s3Key"] = body.s3_key
     if body.department:
         item["department"] = body.department
     if body.vendor_id:
@@ -206,6 +332,253 @@ async def upload_purchase_order(
     )
 
 
+# ── GET /purchase-orders  (list — view for Admin/AP Clerk/Finance Manager) ─────
+
+
+@po_router.get(
+    "",
+    response_model=ApiResponse[PaginatedResponse[PurchaseOrderListItem]],
+)
+async def list_purchase_orders(
+    user: Annotated[
+        CurrentUser,
+        Depends(require_role(UserRole.ADMIN, UserRole.AP_CLERK, UserRole.FINANCE_MANAGER)),
+    ],
+):
+    """List all stored Purchase Orders (view-only for AP Clerk / Finance Manager).
+
+    Uploading remains ADMIN-only; every authorised role may view the list.
+    """
+    logger.info("Purchase order list requested", extra={"userId": user.user_id})
+
+    try:
+        items = _po_db.scan_all()
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Purchase order list scan failed", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while retrieving purchase orders. Please try again.",
+            status_code=500,
+        )
+
+    rows = [_map_po_row(it) for it in items]
+    # Most recent first (uploadedAt falls back to createdDate for legacy rows).
+    rows.sort(key=lambda r: str(r.uploaded_at or r.created_date or ""), reverse=True)
+
+    return ApiResponse(
+        data=PaginatedResponse(items=rows, count=len(rows), next_key=None)
+    )
+
+
+# ── GET /purchase-orders/{poNumber}  (detail — view for the same roles) ────────
+
+
+@po_router.get(
+    "/{po_number}",
+    response_model=ApiResponse[PurchaseOrderDetailResponse],
+)
+async def get_purchase_order(
+    po_number: str,
+    user: Annotated[
+        CurrentUser,
+        Depends(require_role(UserRole.ADMIN, UserRole.AP_CLERK, UserRole.FINANCE_MANAGER)),
+    ],
+):
+    """Return one Purchase Order's full detail."""
+    try:
+        item = _po_db.get_item({"poNumber": po_number})
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Purchase order lookup failed", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while retrieving the purchase order. Please try again.",
+            status_code=500,
+        )
+
+    if not item:
+        raise AppError("Purchase order not found.", status_code=404)
+
+    return ApiResponse(data=_map_po_detail(item))
+
+
+# ── Upload-and-extract helpers ────────────────────────────────────────────────
+
+
+def _encode_job(invocation_arn: str, kind: str, s3_key: str | None = None) -> str:
+    """Encode an async extract job into an opaque stateless token.
+
+    Carries the incoming ``s3_key`` so the status endpoint can move the object
+    to processed/failed once the async job resolves.
+    """
+    raw = json.dumps({"arn": invocation_arn, "kind": kind, "s3Key": s3_key}).encode()
+    return base64.urlsafe_b64encode(raw).decode()
+
+
+def _decode_job(token: str, expected_kind: str) -> tuple[str, str | None]:
+    """Decode a job token → (invocation_arn, s3_key). Raises AppError if bad."""
+    try:
+        data = json.loads(base64.urlsafe_b64decode(token.encode()))
+        if data.get("kind") != expected_kind or not data.get("arn"):
+            raise ValueError("token mismatch")
+        return str(data["arn"]), data.get("s3Key")
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise AppError("Invalid or expired job id.", status_code=400) from exc
+
+
+def _restage_upload(s3_key: str | None, stage: str) -> None:
+    """Best-effort move of an uploaded PO/GR object to processed/failed.
+
+    Never raises: a storage-housekeeping failure must not turn a successful
+    extraction into an error response for the admin.
+    """
+    if not s3_key:
+        return
+    dest = restage_key(s3_key, stage)
+    if dest == s3_key:
+        return
+    try:
+        _s3.move_object(s3_key, dest)
+    except Exception as exc:  # noqa: BLE001 — best-effort housekeeping
+        logger.error(
+            "Failed to restage uploaded document",
+            extra={"from": s3_key, "toStage": stage, "error": str(exc)},
+        )
+
+
+def _sum_line_item_quantities(extraction: dict) -> float:
+    """Sum the quantity across all extracted line items (0.0 if none)."""
+    line_items = extraction.get("lineItems") or []
+    return sum(
+        float(li.get("quantity", 0))
+        for li in line_items
+        if isinstance(li, dict) and isinstance(li.get("quantity"), (int, float))
+    )
+
+
+def _map_po(extraction: dict, s3_key: str | None = None) -> PurchaseOrderExtractResponse:
+    total = extraction.get("totalAmount")
+    total_qty = _sum_line_item_quantities(extraction)
+    return PurchaseOrderExtractResponse(
+        poNumber=_clean_str(extraction.get("invoiceNumber")),
+        vendorName=_clean_str(extraction.get("vendorName")),
+        totalAmount=float(total) if isinstance(total, (int, float)) and total else None,
+        totalQuantity=total_qty if total_qty > 0 else None,
+        overallConfidence=extraction.get("overallConfidence"),
+        s3Key=s3_key,
+    )
+
+
+def _map_gr(extraction: dict, s3_key: str | None = None) -> GoodsReceiptExtractResponse:
+    total = extraction.get("totalAmount")
+    total_qty = _sum_line_item_quantities(extraction)
+    return GoodsReceiptExtractResponse(
+        grId=_clean_str(extraction.get("invoiceNumber")),
+        poNumber=_clean_str(extraction.get("poReference")),
+        totalQuantityReceived=total_qty if total_qty > 0 else None,
+        totalAmount=float(total) if isinstance(total, (int, float)) and total else None,
+        overallConfidence=extraction.get("overallConfidence"),
+        s3Key=s3_key,
+    )
+
+
+async def _read_upload(file: UploadFile) -> tuple[bytes, str, str]:
+    """Read + validate an uploaded document. Returns (bytes, filename, content_type).
+
+    Raises AppError (400) on an unsupported type or oversized/empty file.
+    """
+    content_type = file.content_type or "application/octet-stream"
+    if content_type not in INVOICE_CONTENT_TYPES:
+        raise AppError(
+            f"Unsupported file type '{content_type}'. Upload a PDF, PNG, or JPEG.",
+            status_code=400,
+        )
+
+    data = await file.read()
+    if not data:
+        raise AppError("The uploaded file is empty.", status_code=400)
+    if len(data) > MAX_FILE_SIZE_BYTES:
+        raise AppError(
+            f"File exceeds the maximum size of {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB.",
+            status_code=400,
+        )
+
+    return data, (file.filename or "upload.pdf"), content_type
+
+
+# ── POST /purchase-orders/extract ─────────────────────────────────────────────
+
+
+@po_router.post("/extract")
+async def extract_purchase_order(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+    file: Annotated[UploadFile, File(...)],
+):
+    """Start PO extraction from an uploaded document (ADMIN, no persistence).
+
+    Sync-then-async: waits up to ~20s for BDA. If it finishes, returns 200 with
+    the mapped PO fields; if still running, returns 202 with a jobId the client
+    polls via GET /purchase-orders/extract/status. The frontend pre-fills the PO
+    form so the admin can confirm/correct before saving.
+    """
+    data, filename, content_type = await _read_upload(file)
+    logger.info("PO extract requested", extra={"userId": user.user_id, "fileName": filename})
+
+    try:
+        extraction, s3_key = extract_from_bytes(
+            file_bytes=data,
+            filename=filename,
+            prefix=DocumentType.PURCHASE_ORDER,
+            content_type=content_type,
+            timeout_s=_SYNC_EXTRACT_TIMEOUT_S,
+        )
+    except ExtractionTimeout as pending:
+        # Still running: hand off to async polling; the status endpoint moves
+        # the object once the job resolves.
+        token = _encode_job(pending.invocation_arn, "po", pending.s3_key)
+        return JSONResponse(
+            status_code=202,
+            content=ApiResponse(status_code=202, data=ExtractPending(jobId=token)).model_dump(by_alias=True),
+        )
+    except ExtractionError as exc:
+        logger.error("PO extraction failed", extra={"reason": str(exc)})
+        _restage_upload(getattr(exc, "s3_key", None), S3Stage.FAILED)
+        raise AppError(
+            "Could not extract details from the document. Enter the fields manually.",
+            status_code=422,
+        )
+
+    _restage_upload(s3_key, S3Stage.PROCESSED)
+    return ApiResponse(data=_map_po(extraction, s3_key))
+
+
+@po_router.get("/extract/status")
+async def po_extract_status(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+    job_id: Annotated[str, Query(alias="jobId")],
+):
+    """Poll a pending PO extraction job. Returns 200 (fields), 202 (pending), or 422."""
+    invocation_arn, s3_key = _decode_job(job_id, "po")
+    try:
+        status = poll_bda_status(invocation_arn)
+    except ExtractionError as exc:
+        logger.error("PO extract status failed", extra={"reason": str(exc)})
+        raise AppError("Could not check extraction status. Try again.", status_code=422)
+
+    if status == "InProgress":
+        return JSONResponse(
+            status_code=202,
+            content=ApiResponse(status_code=202, data=ExtractPending(jobId=job_id)).model_dump(by_alias=True),
+        )
+    if status == "Failed":
+        _restage_upload(s3_key, S3Stage.FAILED)
+        raise AppError(
+            "Could not extract details from the document. Enter the fields manually.",
+            status_code=422,
+        )
+
+    extraction = finalize_bda_job(invocation_arn)
+    _restage_upload(s3_key, S3Stage.PROCESSED)
+    return ApiResponse(data=_map_po(extraction, s3_key))
+
+
 # ── POST /goods-receipts/upload ───────────────────────────────────────────────
 
 
@@ -224,6 +597,7 @@ async def upload_goods_receipt(
     available for three-way matching.
     """
     received_date = body.received_date or datetime.now(timezone.utc).date().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     logger.info(
         "Goods receipt upload",
@@ -260,9 +634,19 @@ async def upload_goods_receipt(
         "grId": body.gr_id,
         "poNumber": body.po_number,
         "totalQuantityReceived": Decimal(str(body.total_quantity_received)),
+        "totalAmount": Decimal(str(body.total_amount)),
         "receivedDate": received_date,
         "status": body.status,
+        # Denormalise the vendor from the linked PO so the GR list can show it
+        # without an extra lookup per row.
+        "vendorName": linked_po.get("vendorName"),
+        # Provenance for the list/detail views.
+        "fileName": body.file_name or body.gr_id,
+        "uploadedBy": user.email or user.user_id,
+        "uploadedAt": now,
     }
+    if body.s3_key:
+        item["s3Key"] = body.s3_key
 
     try:
         _gr_db.put_item(item)
@@ -282,7 +666,228 @@ async def upload_goods_receipt(
     )
 
 
+# ── GET /goods-receipts  (list — view for Admin/AP Clerk/Finance Manager) ──────
+
+
+@gr_router.get(
+    "",
+    response_model=ApiResponse[PaginatedResponse[GoodsReceiptListItem]],
+)
+async def list_goods_receipts(
+    user: Annotated[
+        CurrentUser,
+        Depends(require_role(UserRole.ADMIN, UserRole.AP_CLERK, UserRole.FINANCE_MANAGER)),
+    ],
+):
+    """List all stored Goods Receipts (view-only for AP Clerk / Finance Manager)."""
+    logger.info("Goods receipt list requested", extra={"userId": user.user_id})
+
+    try:
+        items = _gr_db.scan_all()
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Goods receipt list scan failed", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while retrieving goods receipts. Please try again.",
+            status_code=500,
+        )
+
+    rows = [_map_gr_row(it) for it in items]
+    rows.sort(key=lambda r: str(r.uploaded_at or r.received_date or ""), reverse=True)
+
+    return ApiResponse(
+        data=PaginatedResponse(items=rows, count=len(rows), next_key=None)
+    )
+
+
+# ── GET /goods-receipts/{grId}  (detail — view for the same roles) ─────────────
+
+
+@gr_router.get(
+    "/{gr_id}",
+    response_model=ApiResponse[GoodsReceiptDetailResponse],
+)
+async def get_goods_receipt(
+    gr_id: str,
+    user: Annotated[
+        CurrentUser,
+        Depends(require_role(UserRole.ADMIN, UserRole.AP_CLERK, UserRole.FINANCE_MANAGER)),
+    ],
+):
+    """Return one Goods Receipt's full detail."""
+    try:
+        item = _gr_db.get_item({"grId": gr_id})
+    except (ClientError, BotoCoreError) as exc:
+        logger.error("Goods receipt lookup failed", extra={"error": str(exc)})
+        raise AppError(
+            "An error occurred while retrieving the goods receipt. Please try again.",
+            status_code=500,
+        )
+
+    if not item:
+        raise AppError("Goods receipt not found.", status_code=404)
+
+    return ApiResponse(data=_map_gr_detail(item))
+
+
+# ── POST /goods-receipts/extract ──────────────────────────────────────────────
+
+
+@gr_router.post("/extract")
+async def extract_goods_receipt(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+    file: Annotated[UploadFile, File(...)],
+):
+    """Start GR extraction from an uploaded document (ADMIN, no persistence).
+
+    Sync-then-async: waits up to ~20s for BDA. If it finishes, returns 200 with
+    the mapped GR fields (document id -> grId, PO reference -> poNumber, summed
+    line-item quantities -> totalQuantityReceived); if still running, returns 202
+    with a jobId the client polls via GET /goods-receipts/extract/status.
+    """
+    data, filename, content_type = await _read_upload(file)
+    logger.info("GR extract requested", extra={"userId": user.user_id, "fileName": filename})
+
+    try:
+        extraction, s3_key = extract_from_bytes(
+            file_bytes=data,
+            filename=filename,
+            prefix=DocumentType.GOODS_RECEIPT,
+            content_type=content_type,
+            timeout_s=_SYNC_EXTRACT_TIMEOUT_S,
+        )
+    except ExtractionTimeout as pending:
+        token = _encode_job(pending.invocation_arn, "gr", pending.s3_key)
+        return JSONResponse(
+            status_code=202,
+            content=ApiResponse(status_code=202, data=ExtractPending(jobId=token)).model_dump(by_alias=True),
+        )
+    except ExtractionError as exc:
+        logger.error("GR extraction failed", extra={"reason": str(exc)})
+        _restage_upload(getattr(exc, "s3_key", None), S3Stage.FAILED)
+        raise AppError(
+            "Could not extract details from the document. Enter the fields manually.",
+            status_code=422,
+        )
+
+    _restage_upload(s3_key, S3Stage.PROCESSED)
+    return ApiResponse(data=_map_gr(extraction, s3_key))
+
+
+@gr_router.get("/extract/status")
+async def gr_extract_status(
+    user: Annotated[CurrentUser, Depends(require_role(UserRole.ADMIN))],
+    job_id: Annotated[str, Query(alias="jobId")],
+):
+    """Poll a pending GR extraction job. Returns 200 (fields), 202 (pending), or 422."""
+    invocation_arn, s3_key = _decode_job(job_id, "gr")
+    try:
+        status = poll_bda_status(invocation_arn)
+    except ExtractionError as exc:
+        logger.error("GR extract status failed", extra={"reason": str(exc)})
+        raise AppError("Could not check extraction status. Try again.", status_code=422)
+
+    if status == "InProgress":
+        return JSONResponse(
+            status_code=202,
+            content=ApiResponse(status_code=202, data=ExtractPending(jobId=job_id)).model_dump(by_alias=True),
+        )
+    if status == "Failed":
+        _restage_upload(s3_key, S3Stage.FAILED)
+        raise AppError(
+            "Could not extract details from the document. Enter the fields manually.",
+            status_code=422,
+        )
+
+    extraction = finalize_bda_job(invocation_arn)
+    _restage_upload(s3_key, S3Stage.PROCESSED)
+    return ApiResponse(data=_map_gr(extraction, s3_key))
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _clean_str(value: object) -> str | None:
+    """Return a trimmed non-empty string, or None."""
+    if isinstance(value, str):
+        s = value.strip()
+        return s or None
+    return None
+
+
+def _to_float(value: object) -> float | None:
+    """Coerce a DynamoDB Decimal / str / int / float to float, or None."""
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _map_po_row(item: dict) -> PurchaseOrderListItem:
+    """Map a raw PO DynamoDB item to a list row (Decimals → float)."""
+    po_number = str(item.get("poNumber", ""))
+    document_url = None
+    s3_key = item.get("s3Key")
+    if s3_key:
+        try:
+            document_url = _s3.generate_presigned_get(str(s3_key))
+        except Exception:  # noqa: BLE001 — best effort; missing key or S3 issues should not block view
+            document_url = None
+    return PurchaseOrderListItem(
+        poNumber=po_number,
+        fileName=item.get("fileName") or po_number,
+        vendorName=item.get("vendorName"),
+        totalAmount=_to_float(item.get("totalAmount")),
+        totalQuantity=_to_float(item.get("totalQuantity")),
+        currency=item.get("currency"),
+        status=item.get("status"),
+        createdDate=item.get("createdDate"),
+        uploadedBy=item.get("uploadedBy"),
+        uploadedAt=item.get("uploadedAt"),
+        documentUrl=document_url,
+    )
+
+
+def _map_po_detail(item: dict) -> PurchaseOrderDetailResponse:
+    """Map a raw PO DynamoDB item to the full detail response."""
+    base = _map_po_row(item)
+    return PurchaseOrderDetailResponse(
+        **base.model_dump(by_alias=True),
+        department=item.get("department"),
+        vendorId=item.get("vendorId"),
+    )
+
+
+def _map_gr_row(item: dict) -> GoodsReceiptListItem:
+    """Map a raw GR DynamoDB item to a list row (Decimals → float)."""
+    gr_id = str(item.get("grId", ""))
+    document_url = None
+    s3_key = item.get("s3Key")
+    if s3_key:
+        try:
+            document_url = _s3.generate_presigned_get(str(s3_key))
+        except Exception:  # noqa: BLE001 — best effort; missing key or S3 issues should not block view
+            document_url = None
+    return GoodsReceiptListItem(
+        grId=gr_id,
+        poNumber=item.get("poNumber"),
+        fileName=item.get("fileName") or gr_id,
+        vendorName=item.get("vendorName"),
+        totalAmount=_to_float(item.get("totalAmount")),
+        totalQuantityReceived=_to_float(item.get("totalQuantityReceived")),
+        status=item.get("status"),
+        receivedDate=item.get("receivedDate"),
+        uploadedBy=item.get("uploadedBy"),
+        uploadedAt=item.get("uploadedAt"),
+        documentUrl=document_url,
+    )
+
+
+def _map_gr_detail(item: dict) -> GoodsReceiptDetailResponse:
+    """Map a raw GR DynamoDB item to the full detail response."""
+    base = _map_gr_row(item)
+    return GoodsReceiptDetailResponse(**base.model_dump(by_alias=True))
 
 
 def _write_records(

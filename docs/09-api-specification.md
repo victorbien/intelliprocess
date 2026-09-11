@@ -103,10 +103,10 @@ Request a presigned URL for direct S3 upload.
   "data": {
     "documentId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
     "uploadUrl": {
-      "url": "https://intelliprocess-documents-dev.s3.amazonaws.com/",
+      "url": "https://intelliprocess-ai-documents.s3.amazonaws.com/",
       "fields": {
         "key": "invoices/f47ac10b-58cc-4372-a567-0e02b2c3d479/INV-2024-0891.pdf",
-        "bucket": "intelliprocess-documents-dev",
+        "bucket": "intelliprocess-ai-documents",
         "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
         "X-Amz-Credential": "...",
         "X-Amz-Date": "20260725T103000Z",
@@ -332,7 +332,7 @@ Upload an organizational document for the knowledge base.
   "data": {
     "documentId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "uploadUrl": {
-      "url": "https://intelliprocess-documents-dev.s3.amazonaws.com/",
+      "url": "https://intelliprocess-ai-documents.s3.amazonaws.com/",
       "fields": { ... }
     },
     "expiresIn": 300,
@@ -612,6 +612,221 @@ Load sample PO and GR data for demonstration (dev/demo only).
 
 ---
 
+### 7.2 GET /admin/settings
+
+Get the current admin-configurable approval/matching thresholds. Falls back to
+built-in defaults when none have been saved.
+
+**Authorization:** ADMIN
+
+**Response (200 OK):**
+```json
+{
+  "statusCode": 200,
+  "data": {
+    "amountThreshold": 10000,
+    "confidenceThreshold": 0.85,
+    "poAmountTolerance": 0.05,
+    "grQtyTolerance": 0.02
+  }
+}
+```
+
+---
+
+### 7.3 PUT /admin/settings
+
+Update the approval/matching thresholds (persisted to the AppConfig table and
+read by the invoice pipeline on subsequent runs).
+
+**Authorization:** ADMIN
+
+**Request Body:**
+```json
+{
+  "amountThreshold": 10000,
+  "confidenceThreshold": 0.85,
+  "poAmountTolerance": 0.02,
+  "grQtyTolerance": 0.02
+}
+```
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| amountThreshold | number | Yes | ≥ 0 (USD auto-approval ceiling) |
+| confidenceThreshold | number | Yes | 0.0–1.0 |
+| poAmountTolerance | number | Yes | 0.0–1.0 (0 = exact match) |
+| grQtyTolerance | number | Yes | 0.0–1.0 (0 = exact match) |
+
+**Response (200 OK):** Echoes the stored settings (same shape as GET).
+
+**Error Responses:**
+| Status | Condition |
+|--------|-----------|
+| 400 | A value is out of its allowed range |
+| 403 | User is not ADMIN |
+
+---
+
+## 7A. Purchase Order & Goods Receipt Endpoints
+
+Purchase Orders and Goods Receipts are structured reference records used for
+three-way matching. Admins can store them **manually** (`/upload`) or **upload a
+document** to auto-extract candidate fields (`/extract`) which are then confirmed
+in the form before saving.
+
+### 7A.1 POST /purchase-orders/upload
+
+Store a structured Purchase Order (manual entry / confirm-before-save).
+
+**Authorization:** ADMIN
+
+**Request Body:**
+```json
+{
+  "poNumber": "PO-2024-0456",
+  "vendorName": "Acme Office Supplies Inc.",
+  "totalAmount": 658.80,
+  "currency": "USD",
+  "createdDate": "2026-07-01",
+  "department": "Administration",
+  "vendorId": "VENDOR-001"
+}
+```
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| poNumber | string | Yes | 1–64 chars, identifier charset |
+| vendorName | string | Yes | 1–255 chars |
+| totalAmount | number | Yes | > 0 |
+| currency | string | No | 3-letter ISO (default USD) |
+| createdDate | string | No | ISO date (defaults to today) |
+| department | string | No | Max 128 chars |
+| vendorId | string | No | Max 64 chars |
+
+**Response (201 Created):**
+```json
+{ "statusCode": 201, "data": { "poNumber": "PO-2024-0456", "message": "Purchase order stored and available for matching." } }
+```
+
+### 7A.2 POST /goods-receipts/upload
+
+Store a structured Goods Receipt linked to an existing PO.
+
+**Authorization:** ADMIN
+
+**Request Body:**
+```json
+{
+  "grId": "GR-2024-0789",
+  "poNumber": "PO-2024-0456",
+  "totalQuantityReceived": 15,
+  "receivedDate": "2026-07-15",
+  "status": "COMPLETE"
+}
+```
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| grId | string | Yes | 1–64 chars, identifier charset |
+| poNumber | string | Yes | Must reference an existing PO |
+| totalQuantityReceived | number | Yes | > 0 |
+| receivedDate | string | No | ISO date (defaults to today) |
+| status | string | No | COMPLETE, PARTIAL, PENDING (default COMPLETE) |
+
+**Response (201 Created):**
+```json
+{ "statusCode": 201, "data": { "grId": "GR-2024-0789", "poNumber": "PO-2024-0456", "message": "Goods receipt stored and linked to the purchase order." } }
+```
+
+**Error Responses:**
+| Status | Condition |
+|--------|-----------|
+| 400 | Referenced PO does not exist |
+
+### 7A.3 POST /purchase-orders/extract and POST /goods-receipts/extract
+
+Upload a document (`multipart/form-data`, field `file`) to extract candidate
+PO/GR fields via Bedrock Data Automation. **Nothing is persisted** — the
+frontend pre-fills the form with the returned values for the admin to confirm
+and save via the `/upload` endpoint.
+
+**Authorization:** ADMIN
+**Content-Type:** `multipart/form-data` (PDF, PNG, or JPEG; ≤ 10 MB)
+
+This uses a **sync-then-async** pattern to stay within the API Gateway 29s
+integration limit:
+
+- The request waits up to ~18 seconds for extraction.
+- If it completes, returns **200** with the mapped fields.
+- If still running, returns **202** with a `jobId`; the client polls the
+  matching `/extract/status` endpoint until it resolves.
+
+**Response — complete (200 OK), PO example:**
+```json
+{
+  "statusCode": 200,
+  "data": {
+    "status": "complete",
+    "poNumber": "PO-2024-0456",
+    "vendorName": "Acme Office Supplies Inc.",
+    "totalAmount": 658.80,
+    "overallConfidence": 0.82
+  }
+}
+```
+
+**Response — complete (200 OK), GR example:**
+```json
+{
+  "statusCode": 200,
+  "data": {
+    "status": "complete",
+    "grId": "GR-2024-0789",
+    "poNumber": "PO-2024-0456",
+    "totalQuantityReceived": 15,
+    "overallConfidence": 0.82
+  }
+}
+```
+
+> Field mapping (public invoice blueprint → PO/GR): document id → `poNumber`
+> (PO) / `grId` (GR); `vendorName` → PO vendor; document total → PO
+> `totalAmount`; PO reference → GR `poNumber`; sum of line-item quantities → GR
+> `totalQuantityReceived`. Any field may be `null` if not found.
+
+**Response — pending (202 Accepted):**
+```json
+{ "statusCode": 202, "data": { "status": "pending", "jobId": "<opaque-token>" } }
+```
+
+**Error Responses:**
+| Status | Condition |
+|--------|-----------|
+| 400 | Unsupported file type or empty/oversized file |
+| 422 | Extraction failed / document unreadable |
+
+### 7A.4 GET /purchase-orders/extract/status and GET /goods-receipts/extract/status
+
+Poll a pending extraction job.
+
+**Authorization:** ADMIN
+
+**Query Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| jobId | string | Yes | Opaque token returned by the 202 response |
+
+**Responses:**
+| Status | Body | Meaning |
+|--------|------|---------|
+| 200 | Mapped PO/GR fields (as above) | Extraction complete |
+| 202 | `{ status: "pending", jobId }` | Still running — keep polling |
+| 400 | Error envelope | Invalid/expired jobId |
+| 422 | Error envelope | Extraction failed |
+
+---
+
 ## 8. API Gateway Configuration (SAM)
 
 ```yaml
@@ -621,8 +836,16 @@ ApiGateway:
   Properties:
     Name: !Sub "IntelliProcess-API-${Stage}"
     StageName: !Ref Stage
+    EndpointConfiguration: REGIONAL
+    # Treat multipart uploads as binary so API Gateway base64-encodes the body
+    # and Mangum decodes it intact (required for the PO/GR /extract uploads).
+    BinaryMediaTypes:
+      - "multipart/form-data"
     Auth:
       DefaultAuthorizer: CognitoAuthorizer
+      # CORS preflight (OPTIONS) carries no Authorization header, so the default
+      # Cognito authorizer must NOT be applied to it, or preflight returns 401.
+      AddDefaultAuthorizerToCorsPreflight: false
       Authorizers:
         CognitoAuthorizer:
           UserPoolArn: !GetAtt CognitoUserPool.Arn
@@ -630,15 +853,14 @@ ApiGateway:
       AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
       AllowHeaders: "'Content-Type,Authorization,X-Correlation-Id'"
       AllowOrigin: "'*'"  # Restrict to frontend domain in production
-    ThrottleConfig:
-      BurstLimit: 50
-      RateLimit: 100
 
-# Example function with API event
+# Example function with API event.
+# Note: each Lambda serves the FastAPI app (via Mangum) from the shared layer;
+# the handler entry point is `lambda_function.lambda_handler`.
 UploadHandlerFunction:
   Type: AWS::Serverless::Function
   Properties:
-    Handler: app.lambda_handler
+    Handler: lambda_function.lambda_handler
     CodeUri: functions/upload_handler/
     Runtime: python3.12
     Timeout: 30
@@ -687,6 +909,14 @@ UploadHandlerFunction:
 | GET | /chat/sessions/{id} | ChatHandler | Owner only | Get session history |
 | GET | /dashboard/stats | DashboardHandler | FINANCE_MANAGER, ADMIN | Processing stats |
 | POST | /admin/seed-data | DashboardHandler | ADMIN | Load sample data |
+| GET | /admin/settings | DashboardHandler | ADMIN | Get approval/matching thresholds |
+| PUT | /admin/settings | DashboardHandler | ADMIN | Update approval/matching thresholds |
+| POST | /purchase-orders/upload | DashboardHandler | ADMIN | Store a structured PO |
+| POST | /purchase-orders/extract | DashboardHandler | ADMIN | Extract PO fields from a document (sync-then-async) |
+| GET | /purchase-orders/extract/status | DashboardHandler | ADMIN | Poll a pending PO extraction |
+| POST | /goods-receipts/upload | DashboardHandler | ADMIN | Store a structured GR (linked to a PO) |
+| POST | /goods-receipts/extract | DashboardHandler | ADMIN | Extract GR fields from a document (sync-then-async) |
+| GET | /goods-receipts/extract/status | DashboardHandler | ADMIN | Poll a pending GR extraction |
 
 *AP_CLERK can only see their own invoices.
 
@@ -716,4 +946,7 @@ Access-Control-Allow-Headers: Content-Type, Authorization, X-Correlation-Id
 Access-Control-Max-Age: 86400
 ```
 
-All Lambda responses include CORS headers via the shared response formatter.
+CORS headers are emitted by API Gateway (SAM `Cors` config). The default Cognito
+authorizer is **not** applied to CORS preflight (`OPTIONS`) requests
+(`AddDefaultAuthorizerToCorsPreflight: false`) so browsers can complete preflight
+without an `Authorization` header before the authenticated request is sent.

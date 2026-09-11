@@ -3,6 +3,8 @@
  * Assistant bubbles render citations and dataSnapshot when present.
  */
 
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { ChatCitation } from "../../services/api";
 import { CitationList } from "./CitationCard";
 
@@ -31,8 +33,12 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
             : "rounded-bl-sm bg-gray-100 text-gray-800"
         }`}
       >
-        {/* Message text — preserve newlines */}
-        <p className="whitespace-pre-wrap">{message.content}</p>
+        {/* Message text — user is plain; assistant renders Markdown */}
+        {isUser ? (
+          <p className="whitespace-pre-wrap">{message.content}</p>
+        ) : (
+          <MarkdownContent content={message.content} />
+        )}
 
         {/* DataSnapshot: compact key-value list for structured answers */}
         {!isUser && message.dataSnapshot && (
@@ -51,6 +57,65 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ── Markdown renderer for assistant messages ─────────────────────────────── */
+
+function MarkdownContent({ content }: { content: string }) {
+  return (
+    <div className="text-sm leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          p: ({ children }) => <p className="my-1.5">{children}</p>,
+          ul: ({ children }) => (
+            <ul className="my-1.5 list-disc space-y-0.5 pl-5">{children}</ul>
+          ),
+          ol: ({ children }) => (
+            <ol className="my-1.5 list-decimal space-y-0.5 pl-5">{children}</ol>
+          ),
+          li: ({ children }) => <li className="marker:text-gray-400">{children}</li>,
+          strong: ({ children }) => (
+            <strong className="font-semibold text-gray-900">{children}</strong>
+          ),
+          h1: ({ children }) => <h4 className="mb-1 mt-2 font-semibold">{children}</h4>,
+          h2: ({ children }) => <h4 className="mb-1 mt-2 font-semibold">{children}</h4>,
+          h3: ({ children }) => <h4 className="mb-1 mt-2 font-semibold">{children}</h4>,
+          code: ({ children }) => (
+            <code className="rounded bg-gray-200 px-1 py-0.5 text-[12px] text-gray-800">
+              {children}
+            </code>
+          ),
+          a: ({ href, children }) => (
+            <a
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              className="text-indigo-600 underline"
+            >
+              {children}
+            </a>
+          ),
+          table: ({ children }) => (
+            <div className="my-2 overflow-x-auto">
+              <table className="w-full border-collapse text-xs">{children}</table>
+            </div>
+          ),
+          thead: ({ children }) => <thead className="bg-gray-200/60">{children}</thead>,
+          th: ({ children }) => (
+            <th className="border border-gray-300 px-2 py-1 text-left font-semibold">
+              {children}
+            </th>
+          ),
+          td: ({ children }) => (
+            <td className="border border-gray-300 px-2 py-1">{children}</td>
+          ),
+        }}
+      >
+        {content}
+      </ReactMarkdown>
     </div>
   );
 }

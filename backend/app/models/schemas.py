@@ -287,6 +287,18 @@ class ChatSessionSummary(BaseModel):
     first_message: str = Field(..., alias="firstMessage")
     last_activity: str = Field(..., alias="lastActivity")
     message_count: int = Field(..., alias="messageCount")
+    summary: str | None = None
+    summary_generated_at: str | None = Field(None, alias="summaryGeneratedAt")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class ChatSummaryResponse(BaseModel):
+    """Response body for POST /chat/sessions/{id}/summary."""
+
+    session_id: str = Field(..., alias="sessionId")
+    summary: str
+    generated_at: str = Field(..., alias="generatedAt")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
 
@@ -329,6 +341,35 @@ class RecentActivityItem(BaseModel):
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
 
 
+class SupplierBreakdownItem(BaseModel):
+    """A single supplier entry in the dashboard supplier breakdown chart."""
+
+    vendor_name: str = Field(..., alias="vendorName")
+    invoice_count: int = Field(..., alias="invoiceCount")
+    total_amount: float = Field(..., alias="totalAmount")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class AmountBucket(BaseModel):
+    """A single bucket in the invoice amount-distribution chart."""
+
+    bucket: str
+    count: int
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class MatchRateSummary(BaseModel):
+    """Three-way match pass rate summary for the dashboard."""
+
+    matched: int
+    total: int
+    rate: float
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
 class DashboardStatsResponse(BaseModel):
     """Response body for GET /dashboard/stats.
 
@@ -342,6 +383,13 @@ class DashboardStatsResponse(BaseModel):
     recent_activity: list[RecentActivityItem] = Field(
         default_factory=list, alias="recentActivity"
     )
+    supplier_breakdown: list[SupplierBreakdownItem] = Field(
+        default_factory=list, alias="supplierBreakdown"
+    )
+    amount_distribution: list[AmountBucket] = Field(
+        default_factory=list, alias="amountDistribution"
+    )
+    match_rate: MatchRateSummary | None = Field(None, alias="matchRate")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}
 
@@ -409,10 +457,13 @@ class PurchaseOrderUploadRequest(BaseModel):
     po_number: str = Field(..., alias="poNumber", min_length=1, max_length=64)
     vendor_name: str = Field(..., alias="vendorName", min_length=1, max_length=255)
     total_amount: float = Field(..., alias="totalAmount", gt=0)
+    total_quantity: float = Field(..., alias="totalQuantity", gt=0)
     currency: str = Field("USD", min_length=3, max_length=3)
     created_date: str | None = Field(None, alias="createdDate")
     department: str | None = Field(None, max_length=128)
     vendor_id: str | None = Field(None, alias="vendorId", max_length=64)
+    file_name: str | None = Field(None, alias="fileName", max_length=255)
+    s3_key: str | None = Field(None, alias="s3Key", max_length=1024)
 
     @field_validator("po_number")
     @classmethod
@@ -461,8 +512,11 @@ class GoodsReceiptUploadRequest(BaseModel):
     total_quantity_received: float = Field(
         ..., alias="totalQuantityReceived", gt=0
     )
+    total_amount: float = Field(..., alias="totalAmount", gt=0)
     received_date: str | None = Field(None, alias="receivedDate")
     status: str = Field("COMPLETE", max_length=32)
+    file_name: str | None = Field(None, alias="fileName", max_length=255)
+    s3_key: str | None = Field(None, alias="s3Key", max_length=1024)
 
     @field_validator("gr_id")
     @classmethod
@@ -492,5 +546,143 @@ class GoodsReceiptUploadResponse(BaseModel):
     gr_id: str = Field(..., alias="grId")
     po_number: str = Field(..., alias="poNumber")
     message: str = "Goods receipt stored and linked to the purchase order."
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Purchase Order / Goods Receipt List & Detail (view for AP/Finance/Admin) ──
+
+
+class PurchaseOrderListItem(BaseModel):
+    """A single Purchase Order row for GET /purchase-orders.
+
+    ``fileName`` falls back to the PO number when the record was created from
+    the structured form (no uploaded document), so the UI always has a label
+    that links to the detail view.
+    """
+
+    po_number: str = Field(..., alias="poNumber")
+    file_name: str | None = Field(None, alias="fileName")
+    vendor_name: str | None = Field(None, alias="vendorName")
+    total_amount: float | None = Field(None, alias="totalAmount")
+    total_quantity: float | None = Field(None, alias="totalQuantity")
+    currency: str | None = None
+    status: str | None = None
+    created_date: str | None = Field(None, alias="createdDate")
+    uploaded_by: str | None = Field(None, alias="uploadedBy")
+    uploaded_at: str | None = Field(None, alias="uploadedAt")
+    document_url: str | None = Field(None, alias="documentUrl")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class PurchaseOrderDetailResponse(PurchaseOrderListItem):
+    """Full Purchase Order detail for GET /purchase-orders/{poNumber}."""
+
+    department: str | None = None
+    vendor_id: str | None = Field(None, alias="vendorId")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class GoodsReceiptListItem(BaseModel):
+    """A single Goods Receipt row for GET /goods-receipts.
+
+    ``vendorName`` is denormalised from the linked PO at upload time.
+    ``fileName`` falls back to the GR id when there is no uploaded document.
+    """
+
+    gr_id: str = Field(..., alias="grId")
+    po_number: str | None = Field(None, alias="poNumber")
+    file_name: str | None = Field(None, alias="fileName")
+    vendor_name: str | None = Field(None, alias="vendorName")
+    total_amount: float | None = Field(None, alias="totalAmount")
+    total_quantity_received: float | None = Field(None, alias="totalQuantityReceived")
+    status: str | None = None
+    received_date: str | None = Field(None, alias="receivedDate")
+    uploaded_by: str | None = Field(None, alias="uploadedBy")
+    uploaded_at: str | None = Field(None, alias="uploadedAt")
+    document_url: str | None = Field(None, alias="documentUrl")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class GoodsReceiptDetailResponse(GoodsReceiptListItem):
+    """Full Goods Receipt detail for GET /goods-receipts/{grId}."""
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Admin: Approval Settings ─────────────────────────────────────────────────
+
+
+class ApprovalSettings(BaseModel):
+    """Admin-configurable approval/matching thresholds.
+
+    Used as both the PUT /admin/settings request body and the GET response.
+    - amount_threshold:      invoice total auto-approval ceiling (USD).
+    - confidence_threshold:  minimum extraction confidence to auto-approve (0.0-1.0).
+    - po_amount_tolerance:   three-way match margin for PO amount (0.0 = exact, 0.02 = +/-2%).
+    - gr_qty_tolerance:      three-way match margin for GR quantity (0.0 = exact, 0.02 = +/-2%).
+    """
+
+    amount_threshold: float = Field(..., alias="amountThreshold", ge=0)
+    confidence_threshold: float = Field(..., alias="confidenceThreshold", ge=0.0, le=1.0)
+    po_amount_tolerance: float = Field(..., alias="poAmountTolerance", ge=0.0, le=1.0)
+    gr_qty_tolerance: float = Field(..., alias="grQtyTolerance", ge=0.0, le=1.0)
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+# ─── Admin: Upload-and-extract (PO / GR) ──────────────────────────────────────
+
+
+class ExtractPending(BaseModel):
+    """202 response for the sync-then-async extract flow.
+
+    Returned when extraction did not finish within the synchronous window.
+    The client polls GET .../extract/status?jobId=<jobId> until it resolves.
+    """
+
+    status: str = "pending"
+    job_id: str = Field(..., alias="jobId")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class PurchaseOrderExtractResponse(BaseModel):
+    """Extracted PO candidate fields from an uploaded document (not persisted).
+
+    All fields are optional because extraction may not find every value; the
+    admin reviews and edits the pre-filled form before saving via
+    POST /purchase-orders/upload.
+    """
+
+    status: str = "complete"
+    po_number: str | None = Field(None, alias="poNumber")
+    vendor_name: str | None = Field(None, alias="vendorName")
+    total_amount: float | None = Field(None, alias="totalAmount")
+    total_quantity: float | None = Field(None, alias="totalQuantity")
+    overall_confidence: float | None = Field(None, alias="overallConfidence")
+    s3_key: str | None = Field(None, alias="s3Key")
+
+    model_config = {"populate_by_name": True, "serialize_by_alias": True}
+
+
+class GoodsReceiptExtractResponse(BaseModel):
+    """Extracted GR candidate fields from an uploaded document (not persisted).
+
+    All fields are optional because extraction may not find every value; the
+    admin reviews and edits the pre-filled form before saving via
+    POST /goods-receipts/upload.
+    """
+
+    status: str = "complete"
+    gr_id: str | None = Field(None, alias="grId")
+    po_number: str | None = Field(None, alias="poNumber")
+    total_quantity_received: float | None = Field(None, alias="totalQuantityReceived")
+    total_amount: float | None = Field(None, alias="totalAmount")
+    overall_confidence: float | None = Field(None, alias="overallConfidence")
+    s3_key: str | None = Field(None, alias="s3Key")
 
     model_config = {"populate_by_name": True, "serialize_by_alias": True}

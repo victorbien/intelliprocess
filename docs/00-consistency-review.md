@@ -168,9 +168,15 @@ After reviewing all 16 specification documents, the following issues were identi
 - Technical Design Section 6.1 uses: `DOCUMENT_BUCKET: intelliprocess-documents-{stage}`
 - SAM Template (Deployment Architecture) uses: `intelliprocess-docs-${Stage}-${AWS::AccountId}`
 
-**Resolution:** Standardize on the SAM template naming (shorter, includes account ID for uniqueness). Update Technical Design to match.
+**Resolution (updated post-implementation):** The deployed template uses a
+single fixed bucket name **`intelliprocess-ai-documents`** (with
+`DeletionPolicy: Retain`), not the earlier stage/account-suffixed names. All
+docs (Technical Design §6.1, Deployment Architecture, Database Design, API
+Specification, AWS Service Mapping, System Architecture) have been aligned to
+`intelliprocess-ai-documents`.
 
-**Documents Updated:** Technical Design (Section 6.1)
+**Documents Updated:** Technical Design (§6.1), Deployment Architecture,
+Database Design, API Specification, AWS Service Mapping, System Architecture
 
 ---
 
@@ -311,3 +317,48 @@ After reviewing all 16 specification documents, the following issues were identi
 | O2 | Simplify status machine | Removed MATCHED as visible status |
 | O3 | Merge upload handler | Kept separate (correct for security) |
 | O4 | Drop TIFF support | Removed TIFF from supported formats |
+
+---
+
+## Documentation Synchronization (post-implementation)
+
+This section records a documentation-only synchronization pass that aligned the
+specification set with the implemented system after a round of implementation
+changes. No source code was changed as part of this pass.
+
+### Changes reflected
+
+| # | Implementation change | Docs updated |
+|---|-----------------------|--------------|
+| 1 | Real BDA extraction via the **current API** (`InvokeDataAutomationAsync` + `dataAutomationProfileArn`, `get_data_automation_status` polling) using the **AWS-managed public invoice blueprint** (`bedrock-data-automation-public-invoice`, profile `apac.data-automation-v1`) — no custom blueprint/project | 06, 07, 11, 12, 15, 17-handoff |
+| 2 | **Admin-configurable approval settings** stored in a new **`IntelliProcess-AppConfig`** DynamoDB table (singleton `APPROVAL_SETTINGS`; amount/confidence thresholds, PO amount tolerance, GR quantity tolerance); `GET`/`PUT /admin/settings` | 02, 04, 05, 06, 07, 08, 09, 12, 15, 16 |
+| 3 | **Approved-vendor rule (RULE-004) removed** — approval now uses RULE-001 (three-way), RULE-002 (amount ≤ threshold), RULE-003 (confidence ≥ threshold); approver `SYSTEM` | 02, 04, 07, 08, 10, 14, 16 |
+| 4 | **PO/GR upload-and-extract** endpoints, sync-then-async (`200` fields or `202` + `jobId`; `/status` `200/202/422`) reusing the BDA path | 02, 04, 05, 07, 09, 16, 17-handoff |
+| 5 | **CORS preflight fix** — `AddDefaultAuthorizerToCorsPreflight: false` on a REGIONAL API with `BinaryMediaTypes: [multipart/form-data]` | 09, 15 |
+| 6 | **API handler/layer packaging** — handler entry `lambda_function.lambda_handler` (FastAPI + Mangum), shared layer `BuildMethod: makefile` | 06, 09, 15 |
+| 7 | **S3 key format** and **fixed bucket name** `intelliprocess-ai-documents` (`DeletionPolicy: Retain`); prefixes `invoices/`, `po-uploads/`, `gr-uploads/`, `bda-output/` | 05, 06, 08, 09, 10, 12, 15 |
+| 8 | **`USE_MOCKS`** switch in the template (`"false"` for deployed stages) | 06, 07, 15, 17-handoff |
+| 9 | **IAM** — InvoiceProcessor `GetItem` on AppConfig + `Scan` on PurchaseOrders; DashboardHandler BDA `Invoke`/`GetStatus`, `s3:PutObject`, AppConfig read/write; DashboardHandler raised to 512 MB / 29 s | 12, 15 |
+
+### Approach and preserved-history notes
+
+- Where the implementation diverged from an earlier design decision, the
+  original text was preserved and annotated (marked "original"/"historical" or
+  "superseded") rather than deleted — e.g. the **region** (design assumed
+  `us-east-1`; **as deployed: `ap-southeast-2`**) in AWS Service Mapping, the
+  framework note in Technical Design, and the custom-blueprint BDA prompt in
+  Prompt Design (§4).
+- The illustrative SAM template excerpt in Deployment Architecture (§2.1) is
+  supplemented by a new **§2.2 "Recent Implementation Changes"** that lists the
+  exact deltas from the deployed `backend/template.yaml`.
+
+### Remaining known divergences (documentation-level, not introduced here)
+
+- **AgentCore** references (e.g. ADR-005 in System Architecture, "AP Agent"
+  wording in Component Design) predate this pass and were **not** rewritten;
+  the current agent path is direct Bedrock/Strands as already noted in AI Agent
+  Design. These are pre-existing design/implementation divergences, not caused
+  by this session's changes.
+- The Prompt Design custom-blueprint field list (§4.1) is retained as a
+  reference for consumed invoice fields; the public blueprint does not return
+  `dueDate`/`paymentTerms` (handled as `None`).

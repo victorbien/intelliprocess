@@ -1,184 +1,203 @@
-import { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
-import { getInvoice, type InvoiceDetail } from "../services/api";
-import StatusBadge from "../components/common/StatusBadge";
+/** Invoice detail page (task 5.3): extraction, matching, and manual review. */
 
-export default function InvoiceDetailPage() {
-  const { id } = useParams<{ id: string }>();
-  const [invoice, setInvoice] = useState<InvoiceDetail | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+import { useCallback, useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
 
-  useEffect(() => {
-    if (!id) return;
-    getInvoice(id)
-      .then(setInvoice)
-      .catch((err) => {
-        const msg = err?.response?.data?.error ?? "Failed to load invoice.";
-        setError(msg);
-      })
-      .finally(() => setLoading(false));
-  }, [id]);
-
-  if (loading) return <p className="text-gray-500 text-sm">Loading…</p>;
-  if (error)   return (
-    <div className="space-y-3">
-      <p className="text-red-500">{error}</p>
-      <Link to="/invoices" className="text-blue-600 hover:underline text-sm">← Back to Invoices</Link>
-    </div>
-  );
-  if (!invoice) return null;
-
-  const extraction = invoice.extraction as Record<string, any> | undefined;
-
-  return (
-    <div className="space-y-5">
-      <div className="flex items-center gap-3">
-        <Link to="/invoices" className="text-blue-600 hover:underline text-sm">
-          ← Back
-        </Link>
-        <h1 className="text-xl font-bold text-gray-800">{invoice.fileName}</h1>
-        <StatusBadge status={invoice.status} />
-      </div>
-
-      {/* Metadata */}
-      <Section title="Invoice Metadata">
-        <Row label="Document ID" value={invoice.documentId} mono />
-        <Row label="Status"      value={<StatusBadge status={invoice.status} />} />
-        <Row label="Uploaded"    value={new Date(invoice.uploadedAt).toLocaleString()} />
-        <Row label="Uploaded by" value={invoice.uploadedBy} />
-        {invoice.processingDurationMs != null && (
-          <Row label="Processing time" value={`${(invoice.processingDurationMs / 1000).toFixed(1)}s`} />
-        )}
-        {invoice.errorDetails && (
-          <Row label="Error" value={<span className="text-red-500">{invoice.errorDetails}</span>} />
-        )}
-      </Section>
-
-      {/* Extraction */}
-      {extraction && (
-        <Section title="Extracted Fields">
-          {Object.entries(extraction).map(([field, val]) => {
-            if (field === "lineItems") return null;
-            const conf = (invoice.confidence as any)?.[field];
-            return (
-              <Row
-                key={field}
-                label={camel(field)}
-                value={String(val ?? "—")}
-                badge={conf != null ? confBadge(conf) : undefined}
-              />
-            );
-          })}
-
-          {extraction.lineItems && Array.isArray(extraction.lineItems) && (
-            <div className="col-span-2 mt-2">
-              <p className="text-xs text-gray-500 font-medium mb-1">Line Items</p>
-              <table className="w-full text-xs border rounded overflow-hidden">
-                <thead className="bg-gray-50 text-gray-500">
-                  <tr>
-                    {["Description","Qty","Unit Price","Amount"].map(h => (
-                      <th key={h} className="px-3 py-2 text-left font-medium">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y">
-                  {extraction.lineItems.map((item: any, i: number) => (
-                    <tr key={i}>
-                      <td className="px-3 py-2">{item.description}</td>
-                      <td className="px-3 py-2">{item.quantity}</td>
-                      <td className="px-3 py-2">${item.unitPrice?.toFixed(2)}</td>
-                      <td className="px-3 py-2">${item.amount?.toFixed(2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Section>
-      )}
-
-      {/* Match Result */}
-      {invoice.matchResult && (
-        <Section title="Match Result">
-          <pre className="col-span-2 text-xs bg-gray-50 rounded p-3 overflow-auto">
-            {JSON.stringify(invoice.matchResult, null, 2)}
-          </pre>
-        </Section>
-      )}
-
-      {/* Approval Decision */}
-      {invoice.approvalDecision && (
-        <Section title="Approval Decision">
-          <pre className="col-span-2 text-xs bg-gray-50 rounded p-3 overflow-auto">
-            {JSON.stringify(invoice.approvalDecision, null, 2)}
-          </pre>
-        </Section>
-      )}
-
-      {/* Document preview link */}
-      {invoice.documentUrl && (
-        <Section title="Document">
-          <a
-            href={invoice.documentUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="col-span-2 text-blue-600 underline text-sm"
-          >
-            Open document ↗
-          </a>
-        </Section>
-      )}
-    </div>
-  );
-}
-
-/* ── Helpers ─────────────────────────────────────────────────────────── */
+import StatusBadge from "@/components/common/StatusBadge";
+import Spinner from "@/components/common/Spinner";
+import ErrorAlert from "@/components/common/ErrorAlert";
+import ExtractionView from "@/components/invoice/ExtractionView";
+import MatchingResult from "@/components/invoice/MatchingResult";
+import ApprovalPanel from "@/components/invoice/ApprovalPanel";
+import { useAuth } from "@/context/useAuth";
+import { invoicesApi } from "@/services/api";
+import { ApiError, type InvoiceDetail } from "@/services/types";
+import { logger } from "@/services/logger";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-white border rounded-lg shadow-sm p-5">
-      <h2 className="text-sm font-semibold text-gray-700 mb-3">{title}</h2>
-      <dl className="grid grid-cols-2 gap-x-6 gap-y-2">{children}</dl>
+    <section className="rounded-lg border border-slate-200 bg-white p-4">
+      <h2 className="mb-3 text-sm font-semibold text-slate-700">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+function humanizeRole(role?: string): string {
+  const map: Record<string, string> = {
+    AP_CLERK: "AP Clerk",
+    FINANCE_MANAGER: "Finance Manager",
+    ADMIN: "Administrator",
+    STAFF: "Staff",
+  };
+  return map[String(role ?? "")] ?? String(role ?? "—");
+}
+
+function formatDateTime(value?: string): string {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString("en-AU", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** Coloured pill for the automated/manual approval decision. */
+function DecisionBadge({ decision }: { decision?: string }) {
+  const d = String(decision ?? "").toUpperCase();
+  const label =
+    d === "APPROVE" || d === "APPROVED"
+      ? "Approved"
+      : d === "REJECT" || d === "REJECTED"
+        ? "Rejected"
+        : d === "ESCALATE" || d === "ESCALATED"
+          ? "Escalated"
+          : decision || "—";
+  const tone =
+    d.startsWith("APPROV")
+      ? "bg-green-100 text-green-700"
+      : d.startsWith("REJECT")
+        ? "bg-red-100 text-red-700"
+        : "bg-amber-100 text-amber-800";
+  return <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${tone}`}>{label}</span>;
+}
+
+export default function InvoiceDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  const { hasRole } = useAuth();
+  const [invoice, setInvoice] = useState<InvoiceDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!id) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await invoicesApi.detail(id);
+      setInvoice(data);
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Failed to load invoice.";
+      logger.error("invoice", "Detail load failed", err);
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (loading) {
+    return (
+      <div className="flex min-h-[40vh] items-center justify-center">
+        <Spinner label="Loading invoice" />
+      </div>
+    );
+  }
+
+  if (error || !invoice) {
+    return <ErrorAlert message={error ?? "Invoice not found."} onRetry={() => void load()} />;
+  }
+
+  const canReview = hasRole("FINANCE_MANAGER", "ADMIN") && invoice.status === "ESCALATED";
+  const decision = invoice.approvalDecision;
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <Link to="/invoices" className="text-sm text-indigo-600 hover:underline">
+          ← Back to invoices
+        </Link>
+        <div className="mt-1 flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="break-words text-xl font-semibold text-slate-800">{invoice.fileName}</h1>
+            <p className="mt-1 text-xs text-slate-400">
+              Uploaded by {invoice.uploadedBy}
+              {invoice.uploadedAt && <> · {formatDateTime(invoice.uploadedAt)}</>}
+            </p>
+          </div>
+          <StatusBadge status={invoice.status} />
+        </div>
+      </div>
+
+      {invoice.errorDetails && (
+        <ErrorAlert message={`Processing error: ${invoice.errorDetails}`} />
+      )}
+
+      {canReview && <ApprovalPanel documentId={invoice.documentId} onDecision={() => void load()} />}
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Section title="Extracted data">
+          <ExtractionView extraction={invoice.extraction} />
+        </Section>
+
+        <div className="space-y-4">
+          <Section title="Matching">
+            <MatchingResult matchResult={invoice.matchResult} />
+          </Section>
+
+          {decision && (
+            <Section title="Approval decision">
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <DecisionBadge decision={decision.decision} />
+                  {decision.escalateTo && (
+                    <span className="text-xs text-slate-500">
+                      to <span className="font-medium text-slate-700">{humanizeRole(decision.escalateTo)}</span>
+                    </span>
+                  )}
+                </div>
+
+                <dl className="space-y-2 text-sm">
+                  {decision.reason && (
+                    <div>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">Reason</dt>
+                      <dd className="mt-0.5 text-slate-700">{decision.reason}</dd>
+                    </div>
+                  )}
+                  {decision.comment && (
+                    <div>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">Comment</dt>
+                      <dd className="mt-0.5 text-slate-700">{decision.comment}</dd>
+                    </div>
+                  )}
+                  {(decision.approver || decision.approvedAt) && (
+                    <div>
+                      <dt className="text-xs font-medium uppercase tracking-wide text-slate-400">
+                        Reviewed by
+                      </dt>
+                      <dd className="mt-0.5 text-slate-700">
+                        {decision.approver ?? "—"}
+                        {decision.approvedAt && (
+                          <span className="text-slate-400"> · {formatDateTime(decision.approvedAt)}</span>
+                        )}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+              </div>
+            </Section>
+          )}
+
+          {invoice.documentUrl && (
+            <a
+              href={invoice.documentUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-indigo-600 transition hover:bg-slate-50"
+            >
+              View original document
+              <span aria-hidden>↗</span>
+            </a>
+          )}
+        </div>
+      </div>
     </div>
-  );
-}
-
-function Row({
-  label,
-  value,
-  mono = false,
-  badge,
-}: {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-  badge?: React.ReactNode;
-}) {
-  return (
-    <>
-      <dt className="text-xs text-gray-500">{label}</dt>
-      <dd className={`text-sm text-gray-800 flex items-center gap-2 ${mono ? "font-mono text-xs" : ""}`}>
-        {value}
-        {badge}
-      </dd>
-    </>
-  );
-}
-
-function camel(s: string) {
-  return s.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase());
-}
-
-function confBadge(conf: number) {
-  const pct = Math.round(conf * 100);
-  const cls =
-    conf >= 0.85 ? "bg-green-100 text-green-700" :
-    conf >= 0.70 ? "bg-yellow-100 text-yellow-700" :
-                   "bg-red-100 text-red-700";
-  return (
-    <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${cls}`}>
-      {pct}%
-    </span>
   );
 }

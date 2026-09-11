@@ -1,110 +1,326 @@
-import axios from "axios";
+/**
+ * API client — axios instance with JWT injection, error normalization, and
+ * typed methods for every backend endpoint used by the UI.
+ *
+ * The backend wraps successful responses as { statusCode, data } and errors as
+ * { statusCode, error: { code, message } } (older handlers may return a bare
+ * string `error`). `unwrap` and `normalizeError` handle both shapes.
+ */
+import axios, { AxiosError, type AxiosInstance } from "axios";
+import { getToken } from "./auth";
+import { logger } from "./logger";
+import {
+  ApiError,
+  type ApiSuccess,
+  type ChatResponse,
+  type DashboardStats,
+  type DocumentCategory,
+  type DocumentListItem,
+  type DocumentUploadResponse,
+  type ApprovalSettings,
+  type ExtractPending,
+  type GoodsReceiptDetail,
+  type GoodsReceiptExtract,
+  type GoodsReceiptListItem,
+  type GoodsReceiptUploadResponse,
+  type InvoiceApproveResponse,
+  type PurchaseOrderDetail,
+  type PurchaseOrderExtract,
+  type PurchaseOrderListItem,
+  type InvoiceDetail,
+  type InvoiceListItem,
+  type InvoiceUploadResponse,
+  type KbSyncResponse,
+  type PaginatedResponse,
+  type PresignedPost,
+  type PurchaseOrderUploadResponse,
+  type SeedDataResponse,
+} from "./types";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const BASE_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
-export const api = axios.create({ baseURL: BASE_URL });
+export const http: AxiosInstance = axios.create({
+  baseURL: BASE_URL,
+  headers: { "Content-Type": "application/json" },
+  timeout: 65_000, // Bedrock RAG can take up to ~60s (AC-4.1.1 budget + margin).
+});
 
-/* ── Invoices ─────────────────────────────────────────────── */
+// Attach the bearer token (when available) to every request.
+http.interceptors.request.use(async (config) => {
+  const token = await getToken();
+  if (token) {
+    config.headers = config.headers ?? {};
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
 
-export interface UploadUrlResponse {
-  documentId: string;
-  uploadUrl: { url: string; fields: Record<string, string> };
-  expiresIn: number;
+/** Convert an axios error into a normalized ApiError with a friendly message. */
+function normalizeError(err: unknown): ApiError {
+  if (axios.isAxiosError(err)) {
+    const axiosErr = err as AxiosError<{ error?: { code?: string; message?: string } | string }>;
+    const status = axiosErr.response?.status ?? 0;
+    const body = axiosErr.response?.data;
+    let message = "Something went wrong. Please try again.";
+    let code = "UNKNOWN";
+    if (body && typeof body === "object" && "error" in body) {
+      const e = (body as { error?: { code?: string; message?: string } | string }).error;
+      if (typeof e === "string") {
+        message = e;
+      } else if (e) {
+        message = e.message ?? message;
+        code = e.code ?? code;
+      }
+    } else if (axiosErr.code === "ECONNABORTED") {
+      message = "The request timed out. Please try again.";
+      code = "TIMEOUT";
+    } else if (status === 0) {
+      message = "Unable to reach the server. Check your connection and try again.";
+      code = "NETWORK_ERROR";
+    }
+    logger.error("api", `${axiosErr.config?.method?.toUpperCase()} ${axiosErr.config?.url} -> ${status} ${code}: ${message}`);
+    return new ApiError(message, status, code);
+  }
+  logger.error("api", "Unexpected non-axios error", err);
+  return new ApiError("An unexpected error occurred.", 0, "UNKNOWN");
 }
 
-export interface InvoiceListItem {
-  documentId: string;
-  fileName: string;
-  status: string;
-  uploadedAt: string;
-  uploadedBy: string;
-  vendorName?: string;
-  totalAmount?: number;
+/** Extract the `data` payload from the standard success envelope. */
+function unwrap<T>(payload: ApiSuccess<T> | T): T {
+  if (payload && typeof payload === "object" && "data" in (payload as ApiSuccess<T>)) {
+    return (payload as ApiSuccess<T>).data;
+  }
+  return payload as T;
 }
 
-export interface InvoiceDetail extends InvoiceListItem {
-  updatedAt?: string;
-  documentUrl?: string;
-  extraction?: Record<string, unknown>;
-  confidence?: Record<string, number>;
-  overallConfidence?: number;
-  matchResult?: Record<string, unknown>;
-  approvalDecision?: Record<string, unknown>;
-  errorDetails?: string;
-  processingDurationMs?: number;
+async function get<T>(url: string): Promise<T> {
+  try {
+    const res = await http.get<ApiSuccess<T>>(url);
+    return unwrap<T>(res.data);
+  } catch (err) {
+    throw normalizeError(err);
+  }
 }
 
-export async function requestInvoiceUploadUrl(
-  fileName: string,
-  contentType: string
-): Promise<UploadUrlResponse> {
-  const { data } = await api.post("/invoices/upload", { fileName, contentType });
-  return data.data;
+async function post<T>(url: string, body?: unknown): Promise<T> {
+  try {
+    const res = await http.post<ApiSuccess<T>>(url, body ?? {});
+    return unwrap<T>(res.data);
+  } catch (err) {
+    throw normalizeError(err);
+  }
 }
 
-export async function uploadFileToS3(
-  presigned: UploadUrlResponse["uploadUrl"],
-  file: File
-): Promise<void> {
+async function put<T>(url: string, body?: unknown): Promise<T> {
+  try {
+    const res = await http.put<ApiSuccess<T>>(url, body ?? {});
+    return unwrap<T>(res.data);
+  } catch (err) {
+    throw normalizeError(err);
+  }
+}
+
+/** POST multipart/form-data (file uploads). Lets the browser set the boundary. */
+async function postForm<T>(url: string, form: FormData): Promise<T> {
+  try {
+    const res = await http.post<ApiSuccess<T>>(url, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+    return unwrap<T>(res.data);
+  } catch (err) {
+    throw normalizeError(err);
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Upload a file and resolve to the extracted fields, transparently handling the
+ * sync-then-async flow: the start endpoint returns either the fields (complete)
+ * or `{ status: "pending", jobId }` (HTTP 202), in which case we poll the status
+ * endpoint until the job resolves.
+ */
+async function extractWithPolling<T extends { status?: string }>(
+  startUrl: string,
+  statusUrl: string,
+  file: File,
+  { intervalMs = 3000, maxAttempts = 60 } = {},
+): Promise<T> {
   const form = new FormData();
-  Object.entries(presigned.fields).forEach(([k, v]) => form.append(k, v));
   form.append("file", file);
-  // Direct POST to S3 — no auth header
-  await axios.post(presigned.url, form);
+  const first = await postForm<T | ExtractPending>(startUrl, form);
+
+  if ((first as ExtractPending).status !== "pending") {
+    return first as T;
+  }
+
+  let jobId = (first as ExtractPending).jobId;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await sleep(intervalMs);
+    const res = await get<T | ExtractPending>(
+      `${statusUrl}?jobId=${encodeURIComponent(jobId)}`,
+    );
+    if ((res as ExtractPending).status !== "pending") {
+      return res as T;
+    }
+    jobId = (res as ExtractPending).jobId ?? jobId;
+  }
+  throw new ApiError("Extraction timed out. Please try again.", 0, "EXTRACT_TIMEOUT");
 }
 
-export async function listInvoices(
-  status?: string,
-  limit = 20
-): Promise<{ items: InvoiceListItem[]; count: number; nextKey?: string }> {
-  const params: Record<string, string | number> = { limit };
-  if (status) params.status = status;
-  const { data } = await api.get("/invoices", { params });
-  return data.data;
+// ─── Presigned S3 upload helper ───────────────────────────────────────────────
+function buildFormData(fields: Record<string, string>, file: File): FormData {
+  const form = new FormData();
+  Object.entries(fields).forEach(([k, v]) => form.append(k, v));
+  form.append("file", file); // `file` must be the last field for S3 POST.
+  return form;
 }
 
-export async function getInvoice(documentId: string): Promise<InvoiceDetail> {
-  const { data } = await api.get(`/invoices/${documentId}`);
-  return data.data;
+/** POST a file directly to S3 using a presigned POST policy. */
+export async function uploadToS3(presigned: PresignedPost, file: File): Promise<void> {
+  try {
+    await axios.post(presigned.url, buildFormData(presigned.fields, file), {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
+  } catch (err) {
+    logger.error("api", "Direct S3 upload failed", err);
+    throw new ApiError("File upload to storage failed. Please try again.", 0, "UPLOAD_FAILED");
+  }
 }
 
-/* ── Documents ────────────────────────────────────────────── */
+// ─── Invoices ─────────────────────────────────────────────────────────────────
+export const invoicesApi = {
+  requestUpload: (fileName: string, contentType: string) =>
+    post<InvoiceUploadResponse>("/invoices/upload", { fileName, contentType }),
+  list: (params?: { status?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.status) q.set("status", params.status);
+    if (params?.limit) q.set("limit", String(params.limit));
+    const qs = q.toString();
+    return get<PaginatedResponse<InvoiceListItem>>(`/invoices${qs ? `?${qs}` : ""}`);
+  },
+  detail: (id: string) => get<InvoiceDetail>(`/invoices/${id}`),
+  approve: (id: string, action: "APPROVE" | "REJECT", comment: string) =>
+    post<InvoiceApproveResponse>(`/invoices/${id}/approve`, { action, comment }),
+};
 
-export interface DocumentListItem {
-  documentId: string;
-  fileName: string;
-  category: string;
-  uploadedAt: string;
-  description?: string;
-  kbSyncStatus?: string;
+/** Full invoice upload flow: request presigned URL, then POST file to S3. */
+export async function uploadInvoice(file: File): Promise<string> {
+  const { documentId, uploadUrl } = await invoicesApi.requestUpload(file.name, file.type);
+  await uploadToS3(uploadUrl, file);
+  return documentId;
 }
 
-export async function requestDocumentUploadUrl(
-  fileName: string,
-  contentType: string,
-  category: string,
-  description?: string
-): Promise<{ documentId: string; uploadUrl: UploadUrlResponse["uploadUrl"]; expiresIn: number }> {
-  const { data } = await api.post("/documents/upload", {
-    fileName,
-    contentType,
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+export const chatApi = {
+  ask: (question: string, sessionId?: string, categoryFilter?: string) =>
+    post<ChatResponse>("/chat", { question, sessionId, categoryFilter }),
+};
+
+// ─── Documents ──────────────────────────────────────────────────────────────
+export const documentsApi = {
+  list: (category?: DocumentCategory) =>
+    get<PaginatedResponse<DocumentListItem>>(
+      `/documents${category ? `?category=${category}` : ""}`,
+    ),
+  requestUpload: (
+    fileName: string,
+    contentType: string,
+    category: DocumentCategory,
+    description?: string,
+  ) =>
+    post<DocumentUploadResponse>("/documents/upload", {
+      fileName,
+      contentType,
+      category,
+      description,
+    }),
+  sync: () => post<KbSyncResponse>("/documents/sync"),
+};
+
+/** Full document upload flow: request presigned URL, then POST file to S3. */
+export async function uploadDocument(
+  file: File,
+  category: DocumentCategory,
+  description?: string,
+): Promise<string> {
+  const { documentId, uploadUrl } = await documentsApi.requestUpload(
+    file.name,
+    file.type,
     category,
     description,
-  });
-  return data.data;
+  );
+  await uploadToS3(uploadUrl, file);
+  return documentId;
 }
 
-export async function listDocuments(
-  category?: string
-): Promise<{ items: DocumentListItem[]; count: number }> {
-  const params: Record<string, string> = {};
-  if (category) params.category = category;
-  const { data } = await api.get("/documents", { params });
-  return data.data;
-}
+// ─── Dashboard ──────────────────────────────────────────────────────────────
+export const dashboardApi = {
+  stats: () => get<DashboardStats>("/dashboard/stats"),
+};
 
-/* ── Chat / Records Assistant ─────────────────────────────── */
+// ─── Admin ────────────────────────────────────────────────────────────────────
+export const adminApi = {
+  seedData: (dataSet = "default") =>
+    post<SeedDataResponse>("/admin/seed-data", { dataSet }),
+  uploadPurchaseOrder: (body: {
+    poNumber: string;
+    vendorName: string;
+    totalAmount: number;
+    totalQuantity: number;
+    currency?: string;
+    department?: string;
+    fileName?: string;
+    s3Key?: string;
+  }) => post<PurchaseOrderUploadResponse>("/purchase-orders/upload", body),
+  uploadGoodsReceipt: (body: {
+    grId: string;
+    poNumber: string;
+    totalQuantityReceived: number;
+    totalAmount: number;
+    status?: string;
+    fileName?: string;
+    s3Key?: string;
+  }) => post<GoodsReceiptUploadResponse>("/goods-receipts/upload", body),
+  getSettings: () => get<ApprovalSettings>("/admin/settings"),
+  updateSettings: (body: ApprovalSettings) =>
+    put<ApprovalSettings>("/admin/settings", body),
+  extractPurchaseOrder: (file: File) =>
+    extractWithPolling<PurchaseOrderExtract>(
+      "/purchase-orders/extract",
+      "/purchase-orders/extract/status",
+      file,
+    ),
+  extractGoodsReceipt: (file: File) =>
+    extractWithPolling<GoodsReceiptExtract>(
+      "/goods-receipts/extract",
+      "/goods-receipts/extract/status",
+      file,
+    ),
+};
 
+// ─── Purchase Orders (list + detail — viewable by AP/Finance/Admin) ───────────
+export const purchaseOrdersApi = {
+  list: () => get<PaginatedResponse<PurchaseOrderListItem>>("/purchase-orders"),
+  detail: (poNumber: string) =>
+    get<PurchaseOrderDetail>(`/purchase-orders/${encodeURIComponent(poNumber)}`),
+};
+
+// ─── Goods Receipts (list + detail — viewable by AP/Finance/Admin) ────────────
+export const goodsReceiptsApi = {
+  list: () => get<PaginatedResponse<GoodsReceiptListItem>>("/goods-receipts"),
+  detail: (grId: string) =>
+    get<GoodsReceiptDetail>(`/goods-receipts/${encodeURIComponent(grId)}`),
+};
+
+// ─── Records Assistant (chat) — streaming, citations, session summary ─────────
+//
+// These helpers back the floating Records Assistant widget. They intentionally
+// use the shared `http` axios instance (JWT + error handling) for JSON calls
+// and native `fetch` for the SSE stream (axios cannot expose a ReadableStream).
+// The backend wraps success payloads as { data: ... }, so we read `.data.data`.
+
+/** A single retrieved-source citation attached to an assistant answer. */
 export interface ChatCitation {
   documentName: string;
   documentId: string;
@@ -124,13 +340,134 @@ export interface ChatResponseData {
   responseTimeMs: number;
 }
 
+/**
+ * Non-streaming chat call (kept for backward compatibility / fallback).
+ * Prefer `streamChatMessage` for the interactive widget.
+ */
 export async function sendChatMessage(
   question: string,
-  sessionId?: string
+  sessionId?: string,
 ): Promise<ChatResponseData> {
   const body: Record<string, string> = { question };
   if (sessionId) body.sessionId = sessionId;
-  const { data } = await api.post("/chat", body);
-  // Backend wraps in { status_code, data: {...} }
+  const { data } = await http.post("/chat", body);
   return data.data as ChatResponseData;
+}
+
+// ─── Chat SSE Streaming ───────────────────────────────────────────────────────
+export interface SseTokenEvent {
+  type: "token";
+  content: string;
+}
+export interface SseDoneEvent {
+  type: "done";
+  sessionId: string;
+  sourceType: string;
+  citations: ChatCitation[];
+  dataSnapshot?: Record<string, unknown> | null;
+}
+export interface SseErrorEvent {
+  type: "error";
+  message: string;
+}
+export interface SsePingEvent {
+  type: "ping";
+}
+export type SseEvent = SseTokenEvent | SseDoneEvent | SseErrorEvent | SsePingEvent;
+
+/**
+ * Stream a chat message from the backend SSE endpoint (`POST /chat/stream`).
+ *
+ * Uses `fetch` (not axios) so the response body can be consumed as a
+ * `ReadableStream`. Yields typed `SseEvent` objects as they arrive. Malformed
+ * data lines are skipped silently. Pass an `AbortSignal` to cancel the stream.
+ *
+ * Attaches the bearer token (when present) so the stream authenticates the same
+ * way as the shared `http` client.
+ */
+export async function* streamChatMessage(
+  question: string,
+  sessionId?: string,
+  categoryFilter?: string,
+  signal?: AbortSignal,
+): AsyncGenerator<SseEvent> {
+  const body: Record<string, string> = { question };
+  if (sessionId) body.sessionId = sessionId;
+  if (categoryFilter) body.categoryFilter = categoryFilter;
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = await getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const response = await fetch(`${BASE_URL}/chat/stream`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Stream request failed: ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() ?? "";
+    for (const block of blocks) {
+      const dataLine = block.split("\n").find((l) => l.startsWith("data: "));
+      if (!dataLine) continue;
+      try {
+        yield JSON.parse(dataLine.slice(6)) as SseEvent;
+      } catch {
+        // skip malformed event
+      }
+    }
+  }
+}
+
+// ─── Chat Session Summary & Resume ────────────────────────────────────────────
+export interface ChatSessionSummaryItem {
+  sessionId: string;
+  firstMessage: string;
+  lastActivity: string;
+  messageCount: number;
+  summary?: string;
+  summaryGeneratedAt?: string;
+}
+export interface ChatMessageItem {
+  role: string;
+  content: string;
+  timestamp: string;
+  citations?: ChatCitation[] | null;
+  sourceType?: string | null;
+}
+export interface ChatSessionDetailData {
+  sessionId: string;
+  messages: ChatMessageItem[];
+}
+
+// POST /chat/sessions/{id}/summary — fire-and-forget on drawer close. Swallows all errors.
+export async function summarizeSession(sessionId: string): Promise<void> {
+  try {
+    await http.post(`/chat/sessions/${sessionId}/summary`);
+  } catch {
+    // fire-and-forget: a failed summary must never surface to the user
+  }
+}
+
+// GET /chat/sessions/{id} — full message history for the expander.
+export async function getSession(sessionId: string): Promise<ChatSessionDetailData> {
+  const { data } = await http.get(`/chat/sessions/${sessionId}`);
+  return data.data as ChatSessionDetailData;
+}
+
+// GET /chat/sessions — returns most recent session including its stored summary, or null.
+export async function getLatestSessionSummary(): Promise<ChatSessionSummaryItem | null> {
+  const { data } = await http.get("/chat/sessions", { params: { limit: 1 } });
+  const sessions = data.data as ChatSessionSummaryItem[];
+  return sessions.length > 0 ? sessions[0] : null;
 }

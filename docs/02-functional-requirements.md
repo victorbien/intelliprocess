@@ -101,8 +101,9 @@ All functional requirements are tagged with:
 |-----------|-------|
 | Priority | P1 |
 | Description | The system shall attempt to match extracted invoice data against existing Purchase Orders |
-| Matching Criteria | PO number (exact match), vendor name (fuzzy match), total amount (within 5% tolerance) |
+| Matching Criteria | PO number (exact match), vendor name (fuzzy match), total amount (within the PO amount tolerance) |
 | Business Rule | If PO reference is present on invoice, system shall first attempt exact PO number match |
+| Business Rule | The PO amount tolerance is admin-configurable (default 5%; 0 = exact match) — see FR-CROSS-005 |
 | Output | Match result: MATCHED, PARTIAL_MATCH, NO_MATCH |
 
 ### FR-AP-004: Goods Receipt Matching
@@ -111,7 +112,7 @@ All functional requirements are tagged with:
 | Priority | P1 |
 | Description | The system shall verify that goods/services referenced on the invoice have been received |
 | Matching Criteria | PO number linkage, quantity received vs. quantity invoiced |
-| Business Rule | Invoice quantity must not exceed received quantity by more than 2% |
+| Business Rule | Invoice quantity must not exceed received quantity by more than the GR quantity tolerance (admin-configurable, default 2%; 0 = exact match) — see FR-CROSS-005 |
 | Output | GR match result: CONFIRMED, PARTIAL, NOT_RECEIVED |
 
 ### FR-AP-005: Three-Way Match Validation
@@ -119,7 +120,7 @@ All functional requirements are tagged with:
 |-----------|-------|
 | Priority | P1 |
 | Description | The system shall perform three-way matching (Invoice <-> PO <-> Goods Receipt) |
-| Business Rule | All three documents must align on: vendor, PO number, quantities (within tolerance), amounts (within 5%) |
+| Business Rule | Three-way match PASSES only when PO match = MATCHED and GR match = CONFIRMED (each within its admin-configurable tolerance) |
 | Output | THREE_WAY_MATCH_PASS or THREE_WAY_MATCH_FAIL with specific discrepancy details |
 
 ### FR-AP-006: Automatic Approval
@@ -127,9 +128,10 @@ All functional requirements are tagged with:
 |-----------|-------|
 | Priority | P1 |
 | Description | The system shall automatically approve invoices that pass all validation rules |
-| Approval Rules | (1) Three-way match passes, (2) Invoice amount <= $10,000, (3) Overall extraction confidence => 0.85, (4) Vendor is in approved vendor list |
-| Business Rule | All four conditions must be true for auto-approval |
-| Output | Invoice status set to APPROVED with approval timestamp and "AUTO" approver |
+| Approval Rules | (RULE-001) Three-way match passes, (RULE-002) Invoice amount ≤ amount threshold (default $10,000), (RULE-003) Overall extraction confidence ≥ confidence threshold (default 0.85) |
+| Business Rule | All three conditions must be true for auto-approval. Thresholds are admin-configurable (see FR-CROSS-005). |
+| Business Rule | An approved-vendor allow-list check (former RULE-004) has been **removed**; vendor membership no longer gates auto-approval. |
+| Output | Invoice status set to APPROVED with approval timestamp and "SYSTEM" approver |
 
 ### FR-AP-007: Exception Escalation
 | Attribute | Value |
@@ -155,6 +157,17 @@ All functional requirements are tagged with:
 | Description | The system shall display a dashboard summary of invoice processing statistics |
 | Metrics | Total processed, auto-approved, escalated, rejected, average processing time |
 | Refresh | On page load (not real-time for MVP) |
+
+### FR-AP-010: Reference Data Management (PO / GR)
+| Attribute | Value |
+|-----------|-------|
+| Priority | P1 |
+| Description | Administrators shall be able to create Purchase Order and Goods Receipt reference records used for three-way matching |
+| Entry Modes | (1) Manual structured entry; (2) Upload a PO/GR document to auto-extract candidate fields for review |
+| Business Rule | A Goods Receipt must reference an existing Purchase Order |
+| Business Rule | Extracted fields are pre-filled into an editable form; the admin confirms/corrects before saving (extraction never persists directly) |
+| Technology | Amazon Bedrock Data Automation (public invoice blueprint), invoked synchronously with an async fallback |
+| Output | PO/GR reference records stored in DynamoDB and available to the matcher |
 
 ---
 
@@ -251,6 +264,17 @@ All functional requirements are tagged with:
 | Limits | 100 requests/minute per user |
 | Implementation Note | API Gateway throttling configuration |
 
+### FR-CROSS-005: Admin-Configurable Approval Settings
+| Attribute | Value |
+|-----------|-------|
+| Priority | P1 |
+| Description | Administrators shall be able to view and adjust the thresholds that drive auto-approval and three-way matching |
+| Settings | amountThreshold (USD, default 10000), confidenceThreshold (0–1, default 0.85), poAmountTolerance (0–1, default 0.05), grQtyTolerance (0–1, default 0.02) |
+| Business Rule | Settings are persisted (AppConfig table) and applied to subsequent invoice processing; when unset, built-in defaults apply |
+| Business Rule | A tolerance of 0 means an exact match is required |
+| Access | ADMIN role only (`GET`/`PUT /admin/settings`) |
+| Output | Persisted approval settings applied by the matcher and rules engine |
+
 ---
 
 ## 6. Requirements Summary Matrix
@@ -272,6 +296,7 @@ All functional requirements are tagged with:
 | FR-AP-007 | Exception Escalation | P1 | AP | Week 2 |
 | FR-AP-008 | Manual Review UI | P2 | AP | Week 3 |
 | FR-AP-009 | Processing Summary | P1 | AP | Week 3 |
+| FR-AP-010 | Reference Data Management (PO/GR) | P1 | AP | Week 2 |
 | FR-RAG-001 | Document Ingestion | P1 | RAG | Week 1 |
 | FR-RAG-002 | NL Query Interface | P1 | RAG | Week 2 |
 | FR-RAG-003 | Source Citation | P1 | RAG | Week 2 |
@@ -281,3 +306,4 @@ All functional requirements are tagged with:
 | FR-CROSS-001 | Unified Document Pipeline | P1 | CROSS | Week 2 |
 | FR-CROSS-002 | Audit Logging | P2 | CROSS | Week 3 |
 | FR-CROSS-003 | API Rate Limiting | P2 | CROSS | Week 3 |
+| FR-CROSS-005 | Admin-Configurable Approval Settings | P1 | CROSS | Week 3 |

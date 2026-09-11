@@ -31,7 +31,16 @@
 | Utilities | python-dateutil, uuid | stdlib | Date parsing, ID generation |
 | Packaging | AWS SAM | latest | Lambda deployment + IaC |
 
-**Decision: No web framework (Flask/FastAPI)**
+**Implementation note (updated):** The API Lambdas (UploadHandler, ChatHandler,
+DashboardHandler) are implemented as a single **FastAPI application served via
+Mangum**, packaged in the shared layer; each function's handler entry point is
+`lambda_function.lambda_handler` (`from app.main import handler`). API Gateway
+still owns routing/CORS/auth at the edge, and each function is wired only to its
+designated routes. The InvoiceProcessor Lambda remains a plain S3-event handler.
+The original MVP intent (below) was framework-less; the FastAPI+Mangum approach
+was adopted for shared middleware, validation, and routing across the app.
+
+**Original decision: No web framework (Flask/FastAPI)**
 - Lambda handlers are simple request→response functions
 - API Gateway handles routing, CORS, auth
 - Adding a framework increases cold start and complexity without benefit for this scale
@@ -164,9 +173,15 @@ intelliprocess-ai/
 | UploadHandler | API Gateway POST | 30s | 256MB | Generate presigned URL, create metadata |
 | InvoiceProcessor | S3 Event (ObjectCreated) | 300s | 512MB | Orchestrate extraction + matching + rules |
 | ChatHandler | API Gateway POST/GET | 60s | 256MB | Handle RAG queries and session history |
-| DashboardHandler | API Gateway GET/POST | 10s | 128MB | Invoice list/detail, approval, stats, admin |
+| DashboardHandler | API Gateway GET/POST/PUT | 29s | 512MB | Invoice list/detail, approval, stats, admin settings, PO/GR upload + document extraction |
 
-**Note on DashboardHandler:** This function handles multiple routes via internal path dispatch. For MVP simplicity we accept one Lambda for multiple endpoints. Post-MVP, split into separate functions for better isolation and IAM scoping.
+**Note on DashboardHandler:** This function handles multiple routes via the
+FastAPI app (see framework note below). It also serves the admin approval
+settings (`/admin/settings`) and the PO/GR reference-data endpoints, including
+synchronous BDA document extraction (`/purchase-orders/extract`,
+`/goods-receipts/extract`) — hence its higher timeout (29s, the API Gateway
+integration ceiling) and memory. Post-MVP, split into separate functions for
+better isolation and IAM scoping.
 
 ### 3.2 Upload Handler Flow
 
@@ -251,11 +266,16 @@ def lambda_handler(event, context):
                                gr_result["status"] == "CONFIRMED") else "FAIL"
         all_discrepancies = po_result["discrepancies"] + gr_result["discrepancies"]
         
-        # 7. Apply approval rules
+        # 6b. Load admin-configurable thresholds/tolerances (AppConfig; defaults if unset)
+        settings = settings_store.get_approval_settings()
+        # (poAmountTolerance/grQtyTolerance are passed into the matcher calls above;
+        #  amountThreshold/confidenceThreshold are passed into rules below)
+
+        # 7. Apply approval rules (RULE-001 match, RULE-002 amount, RULE-003 confidence)
         decision = rules.evaluate(
             total_amount=extraction_result["totalAmount"],
             overall_confidence=extraction_result["overallConfidence"],
-            vendor_name=extraction_result["vendorName"],
+            vendor_name=extraction_result["vendorName"],  # for logging only; not a rule
             three_way_match_status=three_way,
             discrepancies=all_discrepancies
         )
@@ -502,17 +522,26 @@ def api_handler(func):
 ### 6.1 Environment Variables
 
 ```yaml
-# Per-Lambda environment variables (set in SAM template)
-DOCUMENT_BUCKET: intelliprocess-docs-{stage}-{account-id}
+# Shared environment variables (set in SAM template Globals)
+STAGE: {stage}
+DOCUMENT_BUCKET: intelliprocess-ai-documents
 INVOICE_TABLE: IntelliProcess-Invoices-{stage}
 DOCUMENT_TABLE: IntelliProcess-Documents-{stage}
 PO_TABLE: IntelliProcess-PurchaseOrders-{stage}
 GR_TABLE: IntelliProcess-GoodsReceipts-{stage}
 CONVERSATION_TABLE: IntelliProcess-Conversations-{stage}
+CONFIG_TABLE: IntelliProcess-AppConfig-{stage}   # admin approval settings
 KNOWLEDGE_BASE_ID: <set after KB creation>
+BDA_PROJECT_ARN: <optional; not required for the public-blueprint path>
 BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+USE_MOCKS: "false"    # "true" for local dev (skips real AWS/BDA calls)
 LOG_LEVEL: INFO
 ```
+
+> Note: `USE_MOCKS` controls whether extraction (and other AWS integrations)
+> call real services or return deterministic mocks. It is `"false"` in the
+> deployed stack (real BDA) and can be `"true"` for local development. The
+> deployed value comes from the SAM template, not from `.env`.
 
 ### 6.2 Frontend Configuration
 

@@ -68,10 +68,7 @@ export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
 
-    // Drawer occupies [vw + dx - DRAWER_WIDTH … vw + dx] horizontally
-    // and [vh + dy - drawerHeight … vh + dy] vertically.
-    const drawerHeight = drawerRef.current?.offsetHeight ?? vh - 64;
-
+    // Drawer occupies [vw + dx - DRAWER_WIDTH … vw + dx] horizontally.
     // Left edge must stay ≥ 0  →  vw + dx - DRAWER_WIDTH ≥ 0  →  dx ≥ DRAWER_WIDTH - vw
     const minDx = DRAWER_WIDTH - vw;
     // Right edge must stay ≤ vw  →  vw + dx ≤ vw  →  dx ≤ 0
@@ -234,7 +231,7 @@ export default function ChatDrawer({ open, onClose }: ChatDrawerProps) {
 
         {/* ── Chat window ──────────────────────────────────────────── */}
         <div className="flex-1 overflow-hidden">
-          <ChatWindow />
+          <ChatWindow open={open} />
         </div>
       </div>
     </>

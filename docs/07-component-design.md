@@ -201,9 +201,8 @@ C3: Invoice Processing Engine
 │   ├── Three-way match orchestration
 │   └── Tolerance calculations
 ├── C3.3: Rules Engine
-│   ├── Approval threshold rules
-│   ├── Confidence threshold rules
-│   ├── Vendor whitelist check
+│   ├── Amount threshold rule (configurable)
+│   ├── Confidence threshold rule (configurable)
 │   └── Escalation routing logic
 └── C3.4: AgentCore AP Agent
     ├── Agent instructions
@@ -230,6 +229,15 @@ class ExtractionResult:
     raw_response: dict        # Full BDA response for debugging
     overall_confidence: float # Average of all field confidences
 ```
+
+**BDA invocation (current API):** `extract_invoice(bucket, s3_key)` invokes
+Bedrock Data Automation with the AWS-managed **public invoice blueprint** and a
+**data-automation profile ARN** (resolved at runtime via STS), then reads the
+`inference_result` from the job's custom output and maps it to the schema above.
+When `settings.USE_MOCKS` is true (local dev), it returns a deterministic mock
+instead of calling AWS. See `17-bda-extraction-handoff.md` for the field mapping
+and ARNs. Fields the public blueprint does not provide (`dueDate`,
+`paymentTerms`) are returned as `None`.
 
 ### 4.4 Matching Module Detail
 
@@ -260,43 +268,81 @@ class ThreeWayMatchResult:
     all_discrepancies: list[str]
 ```
 
+**Configurable tolerances:** `match_purchase_order(..., amount_tolerance)` and
+`match_goods_receipt(..., qty_tolerance)` accept the tolerance as a parameter
+(defaults 0.05 and 0.02). The processor loads these from the admin-configurable
+approval settings (AppConfig) per run and passes them in. A tolerance of `0`
+enforces an exact match.
+
 ### 4.5 Rules Engine Detail
 
 ```python
-# C3.3 Approval Rules (evaluated in order)
+# C3.3 Approval Rules (evaluated together; escalation routing picks the
+# highest-priority failure). Thresholds are supplied by the caller from the
+# admin-configurable approval settings (AppConfig table); the values below are
+# the built-in defaults.
+#
+# evaluate_approval_rules(total_amount, overall_confidence, vendor_name,
+#     three_way_match_status, discrepancies,
+#     amount_threshold=10000.0, confidence_threshold=0.85)
+
 APPROVAL_RULES = [
     {
         "id": "RULE-001",
         "name": "Three-Way Match Required",
-        "condition": "three_way_match.status == 'PASS'",
+        "condition": "three_way_match_status == 'PASS'",
         "on_fail": {"action": "ESCALATE", "to": "AP_CLERK",
                     "reason": "Three-way match failed: {discrepancies}"}
     },
     {
         "id": "RULE-002",
         "name": "Amount Threshold",
-        "condition": "extraction.total_amount <= 10000",
+        "condition": "total_amount <= amount_threshold",   # default 10000
         "on_fail": {"action": "ESCALATE", "to": "FINANCE_MANAGER",
                     "reason": "Amount ${amount} exceeds auto-approval threshold"}
     },
     {
         "id": "RULE-003",
         "name": "Confidence Threshold",
-        "condition": "extraction.overall_confidence >= 0.85",
+        "condition": "overall_confidence >= confidence_threshold",  # default 0.85
         "on_fail": {"action": "ESCALATE", "to": "AP_CLERK",
-                    "reason": "Low confidence fields: {low_fields}"}
-    },
-    {
-        "id": "RULE-004",
-        "name": "Approved Vendor",
-        "condition": "extraction.vendor_name in APPROVED_VENDORS",
-        "on_fail": {"action": "ESCALATE", "to": "AP_CLERK",
-                    "reason": "Vendor '{vendor}' not in approved vendor list"}
+                    "reason": "Confidence {conf} below threshold"}
     }
 ]
-# If ALL rules pass → AUTO APPROVE
-# First rule that fails → ESCALATE with that rule's routing
+# If ALL rules pass → AUTO APPROVE (approver = "SYSTEM")
+# Any rule fails → ESCALATE, routing by highest-priority failure
+#
+# NOTE: The former RULE-004 (approved-vendor allow-list) has been REMOVED.
+# vendor_name is still passed for PO matching and logging, but it no longer
+# gates approval.
 ```
+
+### 4.5a Approval Settings Store (C3.5)
+
+A small settings service (`services/settings_store.py`) reads/writes the
+singleton approval-settings record in the AppConfig DynamoDB table.
+
+- `get_approval_settings()` returns `{amountThreshold, confidenceThreshold,
+  poAmountTolerance, grQtyTolerance}`, falling back to built-in defaults when no
+  record exists or the read fails (so the pipeline always has usable values).
+- `put_approval_settings(values)` persists the singleton (`configKey =
+  "APPROVAL_SETTINGS"`).
+
+The InvoiceProcessor calls `get_approval_settings()` once per run and threads
+the values into the matcher and rules engine. The DashboardHandler exposes
+`GET`/`PUT /admin/settings` (ADMIN) over the same store.
+
+### 4.5b PO/GR Document Extraction (reuse of the Extraction Module)
+
+The DashboardHandler exposes `POST /purchase-orders/extract` and
+`POST /goods-receipts/extract`, which reuse the BDA Extraction Module against an
+uploaded document to pre-fill PO/GR forms (nothing is persisted). Because a
+synchronous BDA call can approach the API Gateway 29s limit, these use a
+**sync-then-async** pattern: the request waits up to ~18s and returns the fields
+(200) if done, otherwise returns 202 with a `jobId`; the client polls the
+`/extract/status` endpoint (200 fields / 202 pending / 422 failed). The
+extraction helpers are `start_bda_job` → `poll_bda_status` → `finalize_bda_job`,
+wrapped by `extract_from_bytes(..., timeout_s)`.
 
 ### 4.6 Component Interaction Sequence
 

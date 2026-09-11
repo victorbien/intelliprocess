@@ -20,8 +20,26 @@ from moto import mock_aws   # noqa: E402  — import after env vars set
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+def _drop_table_if_exists(dynamodb, table_name: str) -> None:
+    """Delete a table if it already exists in the mocked backend.
+
+    The application's dev_mock (activated when STAGE=dev via conftest importing
+    app.main) starts a process-wide moto mock that pre-creates the ``test-*``
+    tables. Because moto shares one backend per process, this fixture's nested
+    ``mock_aws()`` sees those tables and ``create_table`` would raise
+    ResourceInUseException. Dropping first makes table creation idempotent and
+    guarantees each test starts from clean, freshly-seeded tables.
+    """
+    try:
+        dynamodb.Table(table_name).delete()
+    except Exception:
+        # Table does not exist (or backend not initialised) — nothing to drop.
+        pass
+
+
 def _create_po_table(dynamodb, table_name: str):
     """Create a minimal PO table with GSI-VendorDate."""
+    _drop_table_if_exists(dynamodb, table_name)
     return dynamodb.create_table(
         TableName=table_name,
         BillingMode="PAY_PER_REQUEST",
@@ -46,6 +64,7 @@ def _create_po_table(dynamodb, table_name: str):
 
 def _create_gr_table(dynamodb, table_name: str):
     """Create a minimal GR table with GSI-PONumber."""
+    _drop_table_if_exists(dynamodb, table_name)
     return dynamodb.create_table(
         TableName=table_name,
         BillingMode="PAY_PER_REQUEST",
@@ -172,6 +191,50 @@ class TestMatchPurchaseOrder:
         assert result["status"] == "NO_MATCH"
         assert result["poId"] is None
         assert result["discrepancies"] != []
+
+    def test_missing_po_number_does_not_fuzzy_substitute(self, tables):
+        """Regression: a supplied-but-nonexistent PO must NOT fuzzy-match a
+        different real PO by vendor name.
+
+        Previously, an exact-lookup miss fell through to a vendor-name fuzzy
+        search and adopted an unrelated seeded PO (e.g. PO-2024-0456 for the
+        Acme vendor), producing a false MATCHED/three-way PASS for an invoice
+        referencing a PO that does not exist. The fix returns NO_MATCH instead.
+        """
+        from app.services.matcher import match_purchase_order
+        # Vendor + amount are deliberately chosen to match the seeded
+        # PO-2024-0456 (Acme, $658.80) that the old fuzzy fallback would grab.
+        result = match_purchase_order(
+            po_number="PO-DOES-NOT-EXIST",
+            vendor_name="Acme Office Supplies Inc.",
+            invoice_amount=658.80,
+        )
+        assert result["status"] == "NO_MATCH"
+        assert result["poId"] is None
+        # The discrepancy must name the missing PO so reviewers see the reason.
+        assert result["discrepancies"] == ["PO PO-DOES-NOT-EXIST not found"]
+
+    def test_missing_po_number_three_way_fails(self, tables):
+        """A missing referenced PO must drive the three-way match to FAIL."""
+        from app.services.matcher import (
+            match_goods_receipt,
+            match_purchase_order,
+            three_way_match,
+        )
+        po_result = match_purchase_order(
+            po_number="PO-DOES-NOT-EXIST",
+            vendor_name="Acme Office Supplies Inc.",
+            invoice_amount=658.80,
+            invoiced_quantity=15,
+        )
+        # GR lookup uses the matched poId (None here) → NOT_RECEIVED.
+        gr_result = match_goods_receipt(
+            po_number=po_result.get("poId"),
+            invoiced_quantity=15,
+        )
+        verdict = three_way_match(po_result=po_result, gr_result=gr_result)
+        assert verdict["status"] == "FAIL"
+        assert any("not found" in d.lower() for d in verdict["discrepancies"])
 
     def test_fuzzy_match_no_po_number(self, tables):
         """AC-3.3.2: no PO reference → fall back to vendor fuzzy match."""

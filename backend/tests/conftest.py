@@ -4,14 +4,27 @@ import os
 import pytest
 from unittest.mock import patch, MagicMock
 
-# Set test environment variables before importing app modules
+# Set test environment variables before importing app modules.
+#
+# These MUST be set before ``app.config`` is imported, because pydantic-settings
+# reads them (OS env vars take precedence over the project .env file). Two of
+# them are critical for a hermetic test run:
+#   * AWS_REGION — the app reads ``settings.AWS_REGION`` (default ap-southeast-2
+#     from .env), NOT AWS_DEFAULT_REGION. If the app clients and the moto
+#     fixtures disagree on region, the fixtures create tables in one region
+#     while the app queries another → ResourceNotFoundException.
+#   * USE_MOCKS — the real .env sets USE_MOCKS=false; forcing it false here keeps
+#     app.main from starting its own process-wide moto mock, so each test owns
+#     its mock lifecycle via the local ``mock_aws()`` fixtures.
 os.environ.update({
     "AWS_DEFAULT_REGION": "us-east-1",
+    "AWS_REGION": "us-east-1",
     "AWS_ACCESS_KEY_ID": "testing",
     "AWS_SECRET_ACCESS_KEY": "testing",
     "AWS_SECURITY_TOKEN": "testing",
     "AWS_SESSION_TOKEN": "testing",
     "STAGE": "dev",
+    "USE_MOCKS": "false",
     "DOCUMENT_BUCKET": "test-bucket",
     "INVOICE_TABLE": "test-invoices",
     "PO_TABLE": "test-pos",

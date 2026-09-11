@@ -57,7 +57,6 @@ _APPROVE_DECISION = {
         {"ruleId": "RULE-001", "name": "Three-Way Match", "passed": True, "detail": ""},
         {"ruleId": "RULE-002", "name": "Amount Threshold", "passed": True, "detail": ""},
         {"ruleId": "RULE-003", "name": "Confidence Threshold", "passed": True, "detail": ""},
-        {"ruleId": "RULE-004", "name": "Approved Vendor", "passed": True, "detail": ""},
     ],
 }
 
@@ -69,12 +68,14 @@ _ESCALATE_DECISION = {
         {"ruleId": "RULE-001", "name": "Three-Way Match", "passed": True, "detail": ""},
         {"ruleId": "RULE-002", "name": "Amount Threshold", "passed": False, "detail": ""},
         {"ruleId": "RULE-003", "name": "Confidence Threshold", "passed": True, "detail": ""},
-        {"ruleId": "RULE-004", "name": "Approved Vendor", "passed": True, "detail": ""},
     ],
 }
 
-VALID_S3_KEY = "invoices/f47ac10b-58cc-4372-a567-0e02b2c3d479/test.pdf"
 VALID_DOC_ID = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+# Staged incoming key (current upload layout: invoices/incoming/<id>/<file>).
+VALID_S3_KEY = f"invoices/incoming/{VALID_DOC_ID}/test.pdf"
+PROCESSED_S3_KEY = f"invoices/processed/{VALID_DOC_ID}/test.pdf"
+FAILED_S3_KEY = f"invoices/failed/{VALID_DOC_ID}/test.pdf"
 
 
 def _make_invoice_item(status: str = "UPLOADED") -> dict:
@@ -90,7 +91,15 @@ def _make_invoice_item(status: str = "UPLOADED") -> dict:
 # ── _extract_document_id helper tests ─────────────────────────────────────────
 
 class TestExtractDocumentId:
-    def test_extracts_from_valid_key(self):
+    def test_extracts_from_staged_key(self):
+        """Current layout: invoices/<stage>/<id>/<file> → id is 3rd segment."""
+        from app.services.processor import _extract_document_id
+        assert _extract_document_id("invoices/incoming/abc-123/file.pdf") == "abc-123"
+        assert _extract_document_id("invoices/processed/abc-123/file.pdf") == "abc-123"
+        assert _extract_document_id("invoices/failed/abc-123/file.pdf") == "abc-123"
+
+    def test_extracts_from_legacy_key(self):
+        """Legacy layout: invoices/<id>/<file> → id is 2nd segment."""
         from app.services.processor import _extract_document_id
         assert _extract_document_id("invoices/abc-123/file.pdf") == "abc-123"
 
@@ -101,7 +110,7 @@ class TestExtractDocumentId:
 
     def test_strips_leading_slash(self):
         from app.services.processor import _extract_document_id
-        assert _extract_document_id("/invoices/abc-123/file.pdf") == "abc-123"
+        assert _extract_document_id("/invoices/incoming/abc-123/file.pdf") == "abc-123"
 
 
 # ── _to_dynamo helper tests ────────────────────────────────────────────────────
@@ -268,6 +277,49 @@ class TestProcessInvoiceHappyPath:
         assert gr_call.kwargs.get("po_number") == "PO-2024-0456"
 
 
+class TestMatchingDecision:
+    @patch("app.services.processor.get_approval_settings", return_value={
+        "amountThreshold": 30_000.00,
+        "confidenceThreshold": 0.85,
+        "poAmountTolerance": 0.05,
+        "grQtyTolerance": 0.02,
+    })
+    @patch("app.services.processor.match_goods_receipt", return_value={
+        "status": "CONFIRMED",
+        "grId": "GR-20260908-01",
+        "quantityReceived": 171.0,
+        "quantityInvoiced": 171.0,
+        "amountReceived": 28_692.50,
+        "amountInvoiced": 28_692.50,
+        "amountVariancePct": 0.0,
+        "discrepancies": [],
+    })
+    @patch("app.services.processor.match_purchase_order", return_value={
+        "status": "NO_MATCH",
+        "poId": None,
+        "discrepancies": ["PO PO-20260901-1212 not found"],
+    })
+    def test_missing_referenced_po_cannot_auto_approve(
+        self, mock_po, mock_gr, mock_settings
+    ):
+        """A missing referenced PO must escalate even when other rules pass."""
+        from app.services.processor import run_matching_and_decision
+
+        match_result, decision = run_matching_and_decision({
+            "poReference": "PO-20260901-1212",
+            "vendorName": "A Vendor",
+            "totalAmount": 28_692.50,
+            "overallConfidence": 0.90,
+            "lineItems": [{"quantity": 171}],
+        })
+
+        assert match_result["status"] == "FAIL"
+        assert decision["decision"] == "ESCALATE"
+        assert decision["escalateTo"] == "AP_CLERK"
+        assert any("PO PO-20260901-1212 not found" in detail
+                   for detail in decision["rulesResults"][0]["detail"].split(" — "))
+
+
 # ── process_invoice: escalation path ─────────────────────────────────────────
 
 class TestProcessInvoiceEscalation:
@@ -413,3 +465,76 @@ class TestProcessInvoiceConcurrency:
         from app.services.processor import process_invoice
         # Should not raise
         process_invoice(bucket="test-bucket", s3_key=VALID_S3_KEY)
+
+
+# ── process_invoice: S3 stage-folder moves (incoming → processed | failed) ────
+
+class TestProcessInvoiceStaging:
+    """The source object is moved between incoming/processed/failed folders."""
+
+    @patch("app.services.processor.evaluate_approval_rules", return_value=_APPROVE_DECISION)
+    @patch("app.services.processor.three_way_match", return_value=_GOOD_MATCH)
+    @patch("app.services.processor.match_goods_receipt", return_value=_GOOD_GR_RESULT)
+    @patch("app.services.processor.match_purchase_order", return_value=_GOOD_PO_RESULT)
+    @patch("app.services.processor.extract_invoice", return_value=_GOOD_EXTRACTION)
+    @patch("app.services.processor._s3")
+    @patch("app.services.processor._invoice_db")
+    def test_success_moves_incoming_to_processed(
+        self, mock_db, mock_s3, mock_extract, mock_po, mock_gr, mock_3way, mock_rules
+    ):
+        """A fully-processed invoice is moved incoming/ → processed/."""
+        mock_db.get_item.return_value = _make_invoice_item("UPLOADED")
+        mock_db.update_status = MagicMock()
+
+        from app.services.processor import process_invoice
+        process_invoice(bucket="test-bucket", s3_key=VALID_S3_KEY)
+
+        mock_s3.move_object.assert_called_once_with(VALID_S3_KEY, PROCESSED_S3_KEY)
+
+        # The new (processed) key is persisted on the final status update.
+        final_call = next(
+            c for c in mock_db.update_status.call_args_list
+            if (c.kwargs.get("new_status") or c.args[1]) == InvoiceStatus.APPROVED
+        )
+        assert final_call.kwargs.get("s3Key") == PROCESSED_S3_KEY
+
+    @patch("app.services.processor.extract_invoice")
+    @patch("app.services.processor._s3")
+    @patch("app.services.processor._invoice_db")
+    def test_failure_moves_incoming_to_failed(self, mock_db, mock_s3, mock_extract):
+        """An extraction failure moves incoming/ → failed/ and records the key."""
+        from app.services.extraction import ExtractionError
+        mock_db.get_item.return_value = _make_invoice_item("UPLOADED")
+        mock_db.update_status = MagicMock()
+        mock_extract.side_effect = ExtractionError("Corrupt file")
+
+        from app.services.processor import process_invoice
+        process_invoice(bucket="test-bucket", s3_key=VALID_S3_KEY)
+
+        mock_s3.move_object.assert_called_once_with(VALID_S3_KEY, FAILED_S3_KEY)
+
+        error_call = next(
+            c for c in mock_db.update_status.call_args_list
+            if (c.kwargs.get("new_status") or c.args[1]) == InvoiceStatus.ERROR
+        )
+        assert error_call.kwargs.get("s3Key") == FAILED_S3_KEY
+
+    @patch("app.services.processor.evaluate_approval_rules", return_value=_APPROVE_DECISION)
+    @patch("app.services.processor.three_way_match", return_value=_GOOD_MATCH)
+    @patch("app.services.processor.match_goods_receipt", return_value=_GOOD_GR_RESULT)
+    @patch("app.services.processor.match_purchase_order", return_value=_GOOD_PO_RESULT)
+    @patch("app.services.processor.extract_invoice", return_value=_GOOD_EXTRACTION)
+    @patch("app.services.processor._s3")
+    @patch("app.services.processor._invoice_db")
+    def test_legacy_key_is_not_moved(
+        self, mock_db, mock_s3, mock_extract, mock_po, mock_gr, mock_3way, mock_rules
+    ):
+        """A legacy (unstaged) key is left untouched — no move attempted."""
+        mock_db.get_item.return_value = _make_invoice_item("UPLOADED")
+        mock_db.update_status = MagicMock()
+
+        legacy_key = f"invoices/{VALID_DOC_ID}/test.pdf"
+        from app.services.processor import process_invoice
+        process_invoice(bucket="test-bucket", s3_key=legacy_key)
+
+        mock_s3.move_object.assert_not_called()

@@ -54,10 +54,10 @@ build: build-backend build-frontend ## Build all
 # --------------- Infrastructure ---------------
 
 deploy: ## Deploy infrastructure via SAM
-	cd infrastructure && sam build && sam deploy
+	cd backend && sam build && sam deploy
 
 deploy-guided: ## Deploy infrastructure (first time, guided)
-	cd infrastructure && sam build && sam deploy --guided
+	cd backend && sam build && sam deploy --guided
 
 # --------------- Data ---------------
 

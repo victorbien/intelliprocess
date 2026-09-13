@@ -54,7 +54,7 @@ export function PresentationShell() {
   };
 
   return (
-    <div className={`relative min-h-screen overflow-hidden bg-slate-950 text-slate-50 ${presentationMode ? 'presentation-mode' : ''}`}>
+    <div className={`relative min-h-screen overflow-x-hidden overflow-y-auto bg-slate-950 text-slate-50 ${presentationMode ? 'presentation-mode' : ''}`}>
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(56,137,235,0.2),transparent_35%),radial-gradient(circle_at_bottom_right,_rgba(14,165,233,0.14),transparent_30%)]" />
       <ProgressIndicator currentIndex={safeIndex} />
       <Outlet />

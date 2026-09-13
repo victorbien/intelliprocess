@@ -187,20 +187,6 @@ export default function AdminPage() {
               </label>
               <label className="block">
                 <span className="text-xs font-medium text-slate-600">
-                  Ouput Confidence Threshold (0–1, e.g. 0.85 = 85%)
-                </span>
-                <input
-                  type="number"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  className={inputCls}
-                  value={Number.isNaN(settings.confidenceThreshold) ? "" : settings.confidenceThreshold}
-                  onChange={(e) => setSettingField("confidenceThreshold", e.target.value)}
-                />
-              </label>
-              <label className="block">
-                <span className="text-xs font-medium text-slate-600">
                   Total Amount Tolerance (0–1, 0 = exact, 0.02 = ±2%)
                 </span>
                 <input

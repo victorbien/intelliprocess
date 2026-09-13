@@ -19,7 +19,7 @@ export function PresentationControls({
   const currentSlide = slides[currentIndex];
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-5 z-20 flex items-center justify-between px-8">
+    <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex items-center justify-between px-8">
       <div className="pointer-events-auto flex gap-2">
         <button
           type="button"

@@ -197,7 +197,7 @@ def _escalation_target(
     if "RULE-001" in failed_ids:
         disc_str = "; ".join(discrepancies) if discrepancies else "match failed"
         reason = f"Three-way match failed: {disc_str}"
-        return "AP_CLERK", reason
+        return "FINANCE_MANAGER", reason
 
     # RULE-003 failure (the only remaining rule)
     reason = (
@@ -205,4 +205,4 @@ def _escalation_target(
         f"required threshold of {confidence_threshold:.2f}. "
         "Manual verification of extracted fields is required."
     )
-    return "AP_CLERK", reason
+    return "FINANCE_MANAGER", reason
